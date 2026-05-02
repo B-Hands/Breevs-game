@@ -6,38 +6,47 @@ import {
   useQueryClient,
   UseQueryResult,
 } from "@tanstack/react-query";
+import { useWriteContract, useWaitForTransactionReceipt, useAccount } from "wagmi";
+import { useState } from "react";
 import {
   getGameInfo,
   getPlayerData,
   getUserStats,
-  createGame,
-  joinGame,
-  startGame,
-  spin,
-  advanceRound,
-  claimPrize,
   getTotalGames,
   isPrizeClaimed,
   isUserInGame,
   isGameCreator,
+  getPendingSpin,
+  createGameArgs,
+  joinGameArgs,
+  startGameArgs,
+  requestSpinArgs,
+  resolveSpinArgs,
+  advanceRoundArgs,
+  claimPrizeArgs,
+  mapContractError,
   GameStatus,
   GameInfo,
   PlayerData,
   UserStats,
+  SpinRequest,
 } from "@/lib/contractCalls";
 import { useGameStore } from "@/store/gameStore";
 import { useEffect } from "react";
-import { useAccount } from "@micro-stacks/react";
 
-// ----------------------
+// ─── Re-export types so components don't need to import from two places ────────
+export { GameStatus };
+export type { GameInfo, PlayerData, UserStats, SpinRequest };
+
+// ─────────────────────────────────────────────────────────────────────────────
 // READ HOOKS
-// ----------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function useGameInfo(gameId: bigint) {
   return useQuery<GameInfo, Error>({
-    queryKey: ["gameInfo", gameId],
+    queryKey: ["gameInfo", gameId.toString()],
     queryFn: () => getGameInfo(gameId),
-    enabled: !!gameId,
+    enabled: !!gameId && gameId > 0n,
     refetchInterval: 5000,
     refetchOnWindowFocus: true,
   });
@@ -45,7 +54,7 @@ export function useGameInfo(gameId: bigint) {
 
 export function useGamePlayer(gameId: bigint, player: string) {
   return useQuery<PlayerData, Error>({
-    queryKey: ["gamePlayer", gameId, player],
+    queryKey: ["gamePlayer", gameId.toString(), player],
     queryFn: () => getPlayerData(gameId, player),
     enabled: !!gameId && !!player,
   });
@@ -68,11 +77,11 @@ export function useTotalGames() {
   });
 }
 
-export function useIsPrizeClaimed(gameId: bigint, user: string) {
+export function useIsPrizeClaimed(gameId: bigint, _user: string) {
   return useQuery<boolean, Error>({
-    queryKey: ["isPrizeClaimed", gameId.toString(), user],
-    queryFn: () => isPrizeClaimed(gameId, user),
-    enabled: !!gameId && !!user,
+    queryKey: ["isPrizeClaimed", gameId.toString()],
+    queryFn: () => isPrizeClaimed(gameId, _user),
+    enabled: !!gameId && gameId > 0n,
     staleTime: 60_000,
   });
 }
@@ -87,9 +96,18 @@ export function useIsGameCreator(gameId: bigint, user: string) {
 
 export function useIsUserInGame(gameId: bigint, user: string) {
   return useQuery<boolean, Error>({
-    queryKey: ["isUserInGame", gameId, user],
+    queryKey: ["isUserInGame", gameId.toString(), user],
     queryFn: () => isUserInGame(gameId, user),
     enabled: !!gameId && !!user,
+  });
+}
+
+export function usePendingSpin(gameId: bigint) {
+  return useQuery<SpinRequest, Error>({
+    queryKey: ["pendingSpin", gameId.toString()],
+    queryFn: () => getPendingSpin(gameId),
+    enabled: !!gameId && gameId > 0n,
+    refetchInterval: 3000,
   });
 }
 
@@ -122,7 +140,6 @@ export function useActiveGames(page: number = 1, pageSize: number = 10) {
   const query = useQuery<GameInfo[], Error>({
     queryKey: ["activeGames", page],
     queryFn: async () => {
-      // Fetch or get cached allGames data
       const allGamesQueryKey = ["allGames", page];
       let allGames = queryClient.getQueryData<GameInfo[]>(allGamesQueryKey);
       if (!allGames) {
@@ -145,10 +162,7 @@ export function useActiveGames(page: number = 1, pageSize: number = 10) {
           },
         });
       }
-
-      if (!allGames) {
-        return [];
-      }
+      if (!allGames) return [];
       return allGames.filter(
         (g: GameInfo) =>
           g.status === GameStatus.Active || g.status === GameStatus.InProgress
@@ -166,55 +180,47 @@ export function useActiveGames(page: number = 1, pageSize: number = 10) {
 }
 
 export function useMyGames(): UseQueryResult<GameInfo[], Error> {
-  const { stxAddress } = useAccount();
+  const { address } = useAccount();
   const { addGame } = useGameStore();
 
   return useQuery<GameInfo[], Error>({
-    queryKey: ["myGames", stxAddress ?? "invalid"],
+    queryKey: ["myGames", address ?? "invalid"],
     queryFn: async () => {
-      if (!stxAddress) {
-        console.warn("useMyGames: No stxAddress, returning empty games");
-        return [];
-      }
+      if (!address) return [];
       const gameIds = Array.from({ length: 10 }, (_, i) => BigInt(i + 1));
       const games: GameInfo[] = [];
       for (const gameId of gameIds) {
         try {
           const game = await getGameInfo(gameId);
-          if (game.players.includes(stxAddress)) {
+          const lowerAddr = address.toLowerCase();
+          if (game.players.map((p) => p.toLowerCase()).includes(lowerAddr)) {
             games.push(game);
             addGame(game);
           }
         } catch (error) {
           console.warn(`useMyGames: Skipping game ${gameId}:`, error);
-          continue;
         }
       }
       return games;
     },
-    enabled: !!stxAddress,
+    enabled: !!address,
     staleTime: 60_000,
     refetchInterval: 30_000,
   });
 }
 
-export function useGameStatus(
-  gameId?: bigint
-): UseQueryResult<GameInfo, Error> {
+export function useGameStatus(gameId?: bigint): UseQueryResult<GameInfo, Error> {
   const { updateGameStatus } = useGameStore();
 
   const query = useQuery<GameInfo, Error>({
     queryKey: ["gameStatus", gameId?.toString() ?? "invalid"],
     queryFn: () => {
-      if (!gameId) {
-        throw new Error("Invalid game ID");
-      }
+      if (!gameId) throw new Error("Invalid game ID");
       return getGameInfo(gameId);
     },
-    refetchInterval: (query) =>
-      query.state.data?.status === GameStatus.InProgress ? 5000 : 15000,
-    refetchOnWindowFocus: (query) =>
-      query.state.data?.status !== GameStatus.Ended,
+    refetchInterval: (q) =>
+      q.state.data?.status === GameStatus.InProgress ? 5000 : 15000,
+    refetchOnWindowFocus: (q) => q.state.data?.status !== GameStatus.Ended,
     enabled: !!gameId,
     retry: 2,
     staleTime: 60_000,
@@ -229,135 +235,208 @@ export function useGameStatus(
   return query;
 }
 
-// ----------------------
-// WRITE HOOKS
-// ----------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// WRITE HOOKS  (wagmi useWriteContract + useWaitForTransactionReceipt)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Generic hook that wraps wagmi writeContract + waits for receipt */
+function useContractWrite() {
+  const { writeContractAsync } = useWriteContract();
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["activeGames"] });
+    qc.invalidateQueries({ queryKey: ["myGames"] });
+    qc.invalidateQueries({ queryKey: ["gameStatus"] });
+    qc.invalidateQueries({ queryKey: ["allGames"] });
+  };
+  return { writeContractAsync, invalidate };
+}
 
 export function useCreateGame() {
-  const qc = useQueryClient();
-  return useMutation<
-    { txId: string; gameId: bigint },
-    Error,
-    { stake: bigint; duration: bigint; stxAddress: string }
-  >({
-    mutationFn: ({ stake, duration, stxAddress }) =>
-      createGame(stake, duration, stxAddress),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["activeGames"] });
-      qc.invalidateQueries({ queryKey: ["myGames"] });
-      qc.invalidateQueries({ queryKey: ["gameStatus"] });
-    },
-    onError: (error) => {
-      throw new Error(error.message);
-    },
-  });
+  const { writeContractAsync, invalidate } = useContractWrite();
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ duration }: { duration: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(createGameArgs(duration));
+      const totalGames = await getTotalGames();
+      invalidate();
+      return { txId: hash, gameId: totalGames };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return { mutateAsync, isPending, error };
 }
 
 export function useJoinGame() {
-  const qc = useQueryClient();
-  return useMutation<
-    { txId: string },
-    Error,
-    { gameId: bigint; stake: bigint; stxAddress: string }
-  >({
-    mutationFn: ({ gameId, stake, stxAddress }) =>
-      joinGame(gameId, stake, stxAddress),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["activeGames"] });
-      qc.invalidateQueries({ queryKey: ["myGames"] });
-      qc.invalidateQueries({ queryKey: ["gameStatus"] });
-    },
-    onError: (error) => {
-      throw new Error(error.message);
-    },
-  });
+  const { writeContractAsync, invalidate } = useContractWrite();
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ gameId }: { gameId: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(joinGameArgs(gameId));
+      invalidate();
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return { mutateAsync, isPending, error };
 }
 
 export function useStartGame() {
-  const qc = useQueryClient();
-  return useMutation<{ txId: string }, Error, { gameId: bigint }>({
-    mutationFn: ({ gameId }) => startGame(gameId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["activeGames"] });
-      qc.invalidateQueries({ queryKey: ["myGames"] });
-      qc.invalidateQueries({ queryKey: ["gameStatus"] });
-    },
-    onError: (error) => {
-      throw new Error(error.message);
-    },
-  });
+  const { writeContractAsync, invalidate } = useContractWrite();
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ gameId }: { gameId: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(startGameArgs(gameId));
+      invalidate();
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return { mutateAsync, isPending, error };
 }
 
-export interface SpinResult {
-  spinTX: { txId: string; value: string };
+export function useRequestSpin() {
+  const { writeContractAsync, invalidate } = useContractWrite();
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ gameId }: { gameId: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(requestSpinArgs(gameId));
+      invalidate();
+      qc_invalidatePendingSpin(gameId);
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  const qc = useQueryClient();
+  const qc_invalidatePendingSpin = (gameId: bigint) => {
+    qc.invalidateQueries({ queryKey: ["pendingSpin", gameId.toString()] });
+  };
+
+  return { mutateAsync, isPending, error };
 }
 
-export const useSpin = () => {
-  const { updateGameInfo } = useGameStore();
+export function useResolveSpin() {
+  const { writeContractAsync, invalidate } = useContractWrite();
   const qc = useQueryClient();
-  return useMutation<SpinResult, Error, { gameId: bigint }>({
-    mutationFn: ({ gameId }) => spin(gameId),
-    onSuccess: async (data, variables) => {
-      const gameInfo = await getGameInfo(variables.gameId);
-      updateGameInfo(variables.gameId, gameInfo);
-      qc.invalidateQueries({ queryKey: ["activeGames"] });
-      qc.invalidateQueries({ queryKey: ["myGames"] });
-      qc.invalidateQueries({ queryKey: ["game-status"] });
-    },
-    onError: (error) => {
-      console.error("Spin error:", error);
-      throw new Error(error.message);
-    },
-  });
-};
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ gameId }: { gameId: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(resolveSpinArgs(gameId));
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["pendingSpin", gameId.toString()] });
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return { mutateAsync, isPending, error };
+}
 
 export function useAdvanceRound() {
-  const qc = useQueryClient();
-  return useMutation<{ txId: string }, Error, { gameId: bigint }>({
-    mutationFn: ({ gameId }) => advanceRound(gameId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["activeGames"] });
-      qc.invalidateQueries({ queryKey: ["myGames"] });
-      qc.invalidateQueries({ queryKey: ["gameStatus"] });
-    },
-    onError: (error) => {
-      throw new Error(error.message);
-    },
-  });
-}
+  const { writeContractAsync, invalidate } = useContractWrite();
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
 
-// export function useClaimPrize() {
-//   const qc = useQueryClient();
-//   return useMutation<{ txId: string }, Error, { gameId: bigint }>({
-//     mutationFn: ({ gameId }) => claimPrize(gameId),
-//     onSuccess: () => {
-//       qc.invalidateQueries({ queryKey: ["activeGames"] });
-//       qc.invalidateQueries({ queryKey: ["myGames"] });
-//       qc.invalidateQueries({ queryKey: ["gameStatus"] });
-//       qc.invalidateQueries({ queryKey: ["prizeClaimed"] });
-//     },
-//     onError: (error) => {
-//       throw new Error(error.message);
-//     },
-//   });
-// }
+  const mutateAsync = async ({ gameId }: { gameId: bigint }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(advanceRoundArgs(gameId));
+      invalidate();
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return { mutateAsync, isPending, error };
+}
 
 export function useClaimPrize() {
+  const { writeContractAsync, invalidate } = useContractWrite();
   const qc = useQueryClient();
-  return useMutation<{ txId: string }, Error, { gameId: bigint; user: string }>(
-    {
-      mutationFn: ({ gameId }) => claimPrize(gameId),
-      onSuccess: (_, { gameId, user }) => {
-        qc.invalidateQueries({ queryKey: ["activeGames"] });
-        qc.invalidateQueries({ queryKey: ["myGames"] });
-        qc.invalidateQueries({ queryKey: ["gameStatus", gameId.toString()] });
-        qc.invalidateQueries({
-          queryKey: ["isPrizeClaimed", gameId.toString(), user],
-        });
-      },
-      onError: (error) => {
-        throw new Error(error.message);
-      },
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mutateAsync = async ({ gameId, user }: { gameId: bigint; user: string }) => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const hash = await writeContractAsync(claimPrizeArgs(gameId));
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["isPrizeClaimed", gameId.toString()] });
+      return { txId: hash };
+    } catch (err: any) {
+      const mapped = mapContractError(err);
+      const e = new Error(mapped.message);
+      setError(e);
+      throw e;
+    } finally {
+      setIsPending(false);
     }
-  );
+  };
+
+  return { mutateAsync, isPending, error };
 }
+
+// Legacy compatibility alias for components that still use useSpin
+export const useSpin = useRequestSpin;

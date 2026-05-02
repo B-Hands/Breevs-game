@@ -6,7 +6,7 @@ import Russian from "../../assets/RR_LOGO_2_1.png";
 import Logo from "../../assets/BREEVS_logo_1.png";
 import { useRouter } from "next/navigation";
 import { Open_Sans, Spline_Sans_Mono } from "next/font/google";
-import { useAuth, useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
 import WalletDisplay from "../../component/WalletDisplay";
 
 const openSans = Open_Sans({ subsets: ["latin"], weight: ["400", "700"] });
@@ -17,11 +17,10 @@ const splineSansMono = Spline_Sans_Mono({
 
 const StartScreen: React.FC = () => {
   const router = useRouter();
-  const { isSignedIn } = useAuth();
-  const { stxAddress } = useAccount();
+  const { isConnected, address } = useAccount();
 
   const handleStart = () => {
-    if (isSignedIn && stxAddress) {
+    if (isConnected && address) {
       router.push("/Home");
     }
   };
@@ -55,7 +54,7 @@ const StartScreen: React.FC = () => {
         {/* Wallet + Start Button */}
         <div className="flex flex-col items-center mt-10 space-y-6">
           <WalletDisplay showBalance={false} />
-          {isSignedIn && (
+          {isConnected && (
             <div
               onClick={handleStart}
               className="z-40 bg-[#0161d5] rounded-full px-10 py-2 font-bold text-lg 

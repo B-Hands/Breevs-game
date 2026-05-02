@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { Open_Sans } from "next/font/google";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
-import { useAuth, useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
 import Modal from "@/component/ResuableModal";
 import GlowingEffect from "@/component/GlowingEffectProps";
@@ -21,8 +21,7 @@ const openSans = Open_Sans({ subsets: ["latin"], weight: ["400", "700"] });
 
 // ---------- Main Page ----------
 export default function HomePage() {
-  const { isSignedIn } = useAuth();
-  const { stxAddress } = useAccount();
+  const { isConnected, address } = useAccount();
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isCreateGameOpen, setIsCreateGameOpen] = useState(false);
 
@@ -135,7 +134,7 @@ export default function HomePage() {
               ))}
             </div>
 
-            {isSignedIn && activeTab === "active" && (
+            {isConnected && activeTab === "active" && (
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
@@ -163,7 +162,7 @@ export default function HomePage() {
           </div>
 
           {/* Game Grids */}
-          {!isSignedIn ? (
+          {!isConnected ? (
             <div className="text-center py-10">
               <p className="text-gray-400 mb-4">
                 Connect your wallet to create or join games.
@@ -184,7 +183,7 @@ export default function HomePage() {
               setIsCreateGameOpen={setIsCreateGameOpen}
             />
           ) : (
-            <MyGamesGrid address={stxAddress!} />
+            <MyGamesGrid address={address!} />
           )}
         </div>
       </div>

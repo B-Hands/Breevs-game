@@ -1392,12 +1392,15 @@ from .serializers import (
     GameDetailSerializer, GameListSerializer,
     GameCommentarySerializer,
 )
-import google.generativeai as genai
+import anthropic
 import os
 import json
 
-# Configure Gemini
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Configure Claude
+try:
+    anthropic_client = anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY"))
+except Exception as e:
+    anthropic_client = None
 
 class GameViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -1509,8 +1512,6 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 {chr(10).join([f"- {p.wallet_address[:12]}... {'(Risk Mode Active)' if p.used_risk_mode else ''}" for p in players.filter(eliminated=False)])}
                 """
             
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            
             prompt = f"""You are a live sports commentator for a blockchain Russian Roulette game. 
                 Provide exciting, real-time commentary on the current game state.
 
@@ -1522,8 +1523,15 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
 
                 Commentary:"""
             
-            response = model.generate_content(prompt)
-            commentary_text = response.text
+            if anthropic_client:
+                response = anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=300,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                commentary_text = response.content[0].text
+            else:
+                commentary_text = "Tension rises as the wheel spins... (Claude API not configured)"
             
             commentary = GameCommentary.objects.create(
                 game=game,
@@ -1679,9 +1687,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 {chr(10).join([f"{i+1}. {e['address'][:10]}... - Round {e['round']}" for i, e in enumerate(elimination_order)])}
                 """
             
-            model = genai.GenerativeModel('gemini-2.5-pro')
-            
-            prompt = f"""You are a master storyteller recounting an epic Russian Roulette game on the Stacks blockchain. 
+            prompt = f"""You are a master storyteller recounting an epic Russian Roulette game on the Celo blockchain. 
                     Write a compelling narrative summary that captures the full arc of this game.
 
                     Structure your response:
@@ -1696,8 +1702,15 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     Write in an engaging, dramatic style. Use metaphors from poker, warfare, or gladiatorial combat.
                     Keep it under 400 words. Make readers feel the tension and excitement."""
                                 
-            response = model.generate_content(prompt)
-            ai_summary = response.text
+            if anthropic_client:
+                response = anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=600,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                ai_summary = response.content[0].text
+            else:
+                ai_summary = "An epic game of Russian Roulette has concluded! (Claude API not configured)"
             
             key_moments = self._extract_key_moments(events, players, game)
             
@@ -1848,15 +1861,22 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 5. confidence_level (low/medium/high)
                 """
             
-            model = genai.GenerativeModel(
-                'gemini-2.5-flash',
-                generation_config={
-                    "response_mime_type": "application/json"
-                }
-            )
-            
-            response = model.generate_content(context)
-            prediction_json = json.loads(response.text)
+            if anthropic_client:
+                response = anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=600,
+                    messages=[{"role": "user", "content": context}]
+                )
+                text = response.content[0].text
+                
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0]
+                elif "```" in text:
+                    text = text.split("```")[1].split("```")[0]
+                
+                prediction_json = json.loads(text.strip())
+            else:
+                prediction_json = {}
             
             prediction_data = {
                 'game_id': game.game_id,
@@ -1957,12 +1977,19 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                     Be insightful like a professional analyst.
                     """
             
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(context)
+            if anthropic_client:
+                response = anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=700,
+                    messages=[{"role": "user", "content": context}]
+                )
+                ai_analysis = response.content[0].text
+            else:
+                ai_analysis = "Strategy analysis not available (Claude API not configured)."
             
             return Response({
                 'player_stats': player_analyses,
-                'ai_analysis': response.text
+                'ai_analysis': ai_analysis
             }, status=status.HTTP_200_OK)
             
         except Exception as e:

@@ -7,7 +7,7 @@ import { GameStatus, GameInfo } from "@/lib/contractCalls";
 import { useIsGameCreator } from "@/hooks/useGame";
 import { motion } from "framer-motion";
 import { useGameStore } from "@/store/gameStore";
-import { useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
 import { showErrorToast } from "@/component/Toast";
 
 interface GameCardProps {
@@ -24,32 +24,32 @@ export default function GameCard({
   onClick,
 }: GameCardProps) {
   const router = useRouter();
-  const { stxAddress } = useAccount();
+  const { address } = useAccount();
   const { hasActiveGame, getCurrentActiveGame, setSelectedGame } =
     useGameStore();
   const { data: isGameCreator } = useIsGameCreator(
-    stxAddress ? game.gameId : 0n,
-    stxAddress || ""
+    address ? game.gameId : 0n,
+    address || ""
   );
 
-  const isUserGame = stxAddress ? game.players.includes(stxAddress) : false;
-  const isJoinDisabled = stxAddress
-    ? hasActiveGame(stxAddress) && !isUserGame && !isGameCreator
+  const isUserGame = address
+    ? game.players.map((p) => p.toLowerCase()).includes(address.toLowerCase())
+    : false;
+
+  const isJoinDisabled = address
+    ? hasActiveGame(address) && !isUserGame && !isGameCreator
     : false;
 
   const handleAction = async () => {
-    if (!stxAddress) {
-      showErrorToast(
-        "Please connect your wallet to interact",
-        "Wallet Required"
-      );
+    if (!address) {
+      showErrorToast("Please connect your wallet to interact", "Wallet Required");
       return;
     }
 
     const gameIdStr = game.gameId.toString();
 
     if (isJoinDisabled) {
-      const activeGame = getCurrentActiveGame(stxAddress);
+      const activeGame = getCurrentActiveGame(address);
       if (activeGame) {
         showErrorToast(
           `You are already in an active game (#${activeGame.gameId}). Please complete it first.`,
@@ -64,23 +64,19 @@ export default function GameCard({
       router.push(`/GameScreen/${gameIdStr}`);
     } else if (game.status === GameStatus.Active && !isUserGame) {
       setSelectedGame(game);
-      if (onClick) {
-        onClick();
-      }
+      if (onClick) onClick();
     }
   };
 
-  const stakeInSTX = Number(game.stake) / 1_000_000;
+  const stakeInCELO = Number(game.stake) / 1e18;
 
   const shortCreator =
-    game.creator && game.creator.startsWith("ST")
+    game.creator && game.creator.startsWith("0x")
       ? `${game.creator.slice(0, 6)}...${game.creator.slice(-4)}`
       : "Unknown";
 
   const getStatusLabel = (s: GameStatus | number) => {
-    if (isGameCreator) {
-      return "Creator";
-    }
+    if (isGameCreator) return "Creator";
     switch (s) {
       case GameStatus.Active:
         return "Active";
@@ -94,19 +90,13 @@ export default function GameCard({
   };
 
   const getStatusStyles = (s: GameStatus | number) => {
-    if (isGameCreator) {
-      return "bg-purple-500/20 text-purple-400 border-purple-500/30";
-    }
+    if (isGameCreator) return "bg-purple-500/20 text-purple-400 border-purple-500/30";
     return s === GameStatus.Active
       ? "bg-green-500/20 text-green-400 border-green-500/30"
       : s === GameStatus.InProgress
       ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
       : "bg-red-500/20 text-red-400 border-red-500/30";
   };
-
-  const adjustedPlayerCount = game.players.includes(game.creator)
-    ? game.playerCount - 1
-    : game.playerCount;
 
   return (
     <motion.div
@@ -142,9 +132,7 @@ export default function GameCard({
             </p>
           </div>
           <div
-            className={`flex-shrink-0 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full flex items-center gap-1 border backdrop-blur-sm ${getStatusStyles(
-              game.status
-            )}`}
+            className={`flex-shrink-0 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full flex items-center gap-1 border backdrop-blur-sm ${getStatusStyles(game.status)}`}
           >
             <span className="text-[9px] sm:text-xs truncate max-w-[60px] sm:max-w-[100px]">
               {getStatusLabel(game.status)}
@@ -164,9 +152,7 @@ export default function GameCard({
           </p>
           <p className="text-lg sm:text-2xl font-bold text-[#FF3B3B] drop-shadow-lg">
             {game.stake > 0n
-              ? `${Number(stakeInSTX.toFixed(3))
-                  .toString()
-                  .replace(/\.?0+$/, "")} STX`
+              ? `${stakeInCELO.toFixed(2)} CELO`
               : "Free Entry"}
           </p>
         </div>
@@ -174,8 +160,8 @@ export default function GameCard({
           <div className="bg-white/5 backdrop-blur-sm rounded-lg p-1 sm:p-3 border border-white/10 group-hover:bg-white/10 transition-all duration-300">
             <p className="text-xs text-gray-400">Players</p>
             <p className="text-md sm:text-lg font-bold text-white text-center">
-              {adjustedPlayerCount}
-              <span className="text-gray-400 text-sm">/5</span>
+              {game.playerCount}
+              <span className="text-gray-400 text-sm">/6</span>
             </p>
           </div>
           <div className="bg-white/5 backdrop-blur-sm rounded-lg p-1 sm:p-3 border border-white/10 group-hover:bg-white/10 transition-all duration-300">

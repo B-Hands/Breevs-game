@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { useAuth } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
 import { useGameStore } from "@/store/gameStore";
 import { useMyGames } from "@/hooks/useGame";
 import { ToastContainer } from "@/component/Toast";
@@ -11,17 +11,17 @@ interface AppWrapperProps {
 }
 
 export default function AppWrapper({ children }: AppWrapperProps) {
-  const { isSignedIn } = useAuth();
+  const { isConnected } = useAccount();
   const { clearGames, clearCurrentGames } = useGameStore();
   const { data: myGames, isLoading, isError, error } = useMyGames();
 
   useEffect(() => {
-    if (!isSignedIn) {
+    if (!isConnected) {
       console.log("Wallet disconnected, clearing game store");
       clearGames();
       clearCurrentGames();
     }
-  }, [isSignedIn, clearGames, clearCurrentGames]);
+  }, [isConnected, clearGames, clearCurrentGames]);
 
   return (
     <>

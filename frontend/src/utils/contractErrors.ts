@@ -1,90 +1,21 @@
-export const mapContractError = (
-  error: any
-): { code: number; message: string } => {
-  const code = error?.error?.code || 0;
+"use client";
 
-  // Check for specific error messages in the error object
-  const errorMessage = error?.message || error?.error?.message || "";
-
-  // Handle specific error patterns
-  if (
-    errorMessage.includes("ERR-ROUND-NOT-ACTIVE") ||
-    errorMessage.includes("Round is still active")
-  ) {
-    return {
-      code: 412,
-      message: "Round is still active - wait for the timer to expire",
-    };
+/** Simplified – just maps Solidity revert strings to user-friendly messages */
+export function mapContractError(error: unknown): { message: string } {
+  if (error instanceof Error) {
+    const msg = error.message;
+    if (msg.includes("Stake must be exactly 1 CELO")) return { message: "Stake must be exactly 1 CELO" };
+    if (msg.includes("Game not joinable")) return { message: "This game is not open for joining" };
+    if (msg.includes("Game is full")) return { message: "Game is full (6 players max)" };
+    if (msg.includes("Already in game")) return { message: "You are already in this game" };
+    if (msg.includes("Only creator can start")) return { message: "Only the game creator can start" };
+    if (msg.includes("Need exactly 6 players")) return { message: "Need exactly 6 players to start" };
+    if (msg.includes("Must wait for RANDAO reveal")) return { message: "Please wait 1 block before resolving the spin" };
+    if (msg.includes("Spin request expired")) return { message: "Spin expired – request a new spin" };
+    if (msg.includes("No pending spin")) return { message: "No pending spin to resolve" };
+    if (msg.includes("User rejected") || msg.includes("user rejected")) return { message: "Transaction rejected by user" };
+    if (msg.includes("Host must hold at least 5 CELO")) return { message: "Host wallet must hold at least 5 CELO" };
+    return { message: msg };
   }
-
-  if (
-    errorMessage.includes("ERR-INVALID-STATE") ||
-    errorMessage.includes("Invalid game state")
-  ) {
-    return {
-      code: 402,
-      message: "Game is not in the correct state for this action",
-    };
-  }
-
-  if (
-    errorMessage.includes("ERR-NOT-HOST") ||
-    errorMessage.includes("Only the game creator")
-  ) {
-    return {
-      code: 411,
-      message: "Only the game creator can perform this action",
-    };
-  }
-
-  if (
-    errorMessage.includes("ERR-GAME-NOT-FOUND") ||
-    errorMessage.includes("Game not found")
-  ) {
-    return { code: 404, message: "Game not found" };
-  }
-
-  switch (code) {
-    case 100:
-      return { code, message: "Game is full" };
-    case 401:
-      return { code, message: "Unauthorized action" };
-    case 402:
-      return { code, message: "Invalid game state" };
-    case 403:
-      return { code, message: "Round has expired" };
-    case 404:
-      return { code, message: "Insufficient balance or game not found" };
-    case 405:
-      return { code, message: "Player already eliminated" };
-    case 406:
-      return { code, message: "Invalid stake amount" };
-    case 407:
-      return { code, message: "Invalid round duration" };
-    case 408:
-      return { code, message: "Only the winner can claim the prize" };
-    case 409:
-      return { code, message: "Prize already claimed" };
-    case 410:
-      return { code, message: "No winner found" };
-    case 411:
-      return { code, message: "Only the game creator can perform this action" };
-    case 412:
-      return {
-        code,
-        message: "Round is still active - wait for the timer to expire",
-      };
-    case 413:
-      return { code, message: "Minimum host balance not met" };
-    default:
-      return {
-        code,
-        message:
-          error instanceof Error
-            ? error.message.includes("stx-transfer")
-              ? "Failed to transfer STX. Check your balance."
-              : error.message
-            : "Unknown error occurred",
-      };
-  }
-};
+  return { message: String(error) };
+}

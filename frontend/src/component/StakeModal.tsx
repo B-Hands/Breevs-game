@@ -4,7 +4,8 @@ import Modal from "@/component/ResuableModal";
 import GlowingEffect from "@/component/GlowingEffectProps";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
+import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { useJoinGame } from "@/hooks/useGame";
 import { useGameStore } from "@/store/gameStore";
 import {
@@ -12,7 +13,7 @@ import {
   showSuccessToast,
   showTransactionToast,
 } from "@/component/Toast";
-import { GameStatus, GameInfo } from "@/lib/contractCalls";
+import { GameStatus } from "@/lib/contractCalls";
 
 interface StakeModalProps {
   isOpen: boolean;
@@ -26,8 +27,8 @@ const StakeModal: React.FC<StakeModalProps> = ({
   onSuccess,
 }) => {
   const router = useRouter();
-  const { isSignedIn } = useAuth();
-  const { stxAddress } = useAccount();
+  const { address, isConnected } = useAccount();
+  const { openConnectModal } = useConnectModal();
   const { mutateAsync: joinGameMutation, isPending } = useJoinGame();
   const {
     selectedGame,
@@ -42,18 +43,15 @@ const StakeModal: React.FC<StakeModalProps> = ({
   const stake = selectedGame?.stake ?? 0n;
   const gameId = selectedGame?.gameId;
 
-  const stakeValue = typeof stake === "bigint" ? stake : BigInt(stake ?? 0);
-  const stakeInSTX = Number(stakeValue) / 1_000_000;
+  // Contract always uses 1 CELO (1e18 wei)
+  const stakeInCELO = stake > 0n ? Number(stake) / 1e18 : 0;
 
   const handleStake = async () => {
     try {
       setTxId(null);
 
-      if (!isSignedIn || !stxAddress) {
-        showErrorToast(
-          "Please connect your Stacks wallet first",
-          "Wallet Error"
-        );
+      if (!isConnected || !address) {
+        if (openConnectModal) openConnectModal();
         return;
       }
 
@@ -67,9 +65,8 @@ const StakeModal: React.FC<StakeModalProps> = ({
         return;
       }
 
-      // Check if user has an active game
-      const hasActive = hasActiveGame(stxAddress);
-      const activeGame = getCurrentActiveGame(stxAddress);
+      const hasActive = hasActiveGame(address);
+      const activeGame = getCurrentActiveGame(address);
       if (hasActive && activeGame && activeGame.gameId !== gameId) {
         showErrorToast(
           `You are already in an active game (#${activeGame.gameId}). Please complete it first.`,
@@ -79,27 +76,22 @@ const StakeModal: React.FC<StakeModalProps> = ({
         return;
       }
 
-      const tx = await joinGameMutation({
-        gameId,
-        stake: stakeValue,
-        stxAddress,
-      });
+      const tx = await joinGameMutation({ gameId });
 
-      // Update store with the joined game
-      if (selectedGame) {
+      if (selectedGame && address) {
         addToMyGames({
           ...selectedGame,
-          players: [...selectedGame.players, stxAddress],
+          players: [...selectedGame.players, address],
         });
-        setCurrentPlayerGame(selectedGame, stxAddress);
+        setCurrentPlayerGame(selectedGame, address);
       }
 
-      setTxId(tx.txId);
+      setTxId(tx.txId as string);
 
       showTransactionToast(
-        tx.txId,
+        tx.txId as string,
         "success",
-        `https://explorer.stacks.co/txid/${tx.txId}?chain=testnet`
+        `https://alfajores.celoscan.io/tx/${tx.txId}`
       );
       showSuccessToast("Successfully joined the game!", "Success");
 
@@ -112,8 +104,8 @@ const StakeModal: React.FC<StakeModalProps> = ({
       }
     } catch (err: any) {
       console.error("Stake error:", err);
-      const errorMessage = err.message?.includes("User canceled")
-        ? "Transaction canceled by user"
+      const errorMessage = err.message?.includes("rejected")
+        ? "Transaction rejected by user"
         : err.message || "Failed to stake";
       showErrorToast(errorMessage, "Stake Error");
       setTxId(null);
@@ -148,7 +140,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
             </svg>
           </div>
           <h2 className="text-xl sm:text-2xl font-bold mb-1">Join Game</h2>
-          <p className="text-xs text-gray-400">Stake to enter and compete</p>
+          <p className="text-xs text-gray-400">Stake CELO to enter and compete</p>
         </div>
         <div className="bg-gradient-to-r from-red-500/20 via-purple-500/20 to-red-500/20 border border-red-500/30 rounded-xl p-4 mb-4">
           <p className="text-xs text-gray-400 mb-2 text-center">
@@ -156,11 +148,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
           </p>
           <div className="text-center">
             <p className="text-3xl sm:text-4xl font-bold text-[#FF3B3B] drop-shadow-lg">
-              {stakeValue > 0n
-                ? `${Number(stakeInSTX.toFixed(3))
-                    .toString()
-                    .replace(/\.?0+$/, "")} STX`
-                : "Free Entry"}
+              {stakeInCELO > 0 ? `${stakeInCELO.toFixed(2)} CELO` : "Free Entry"}
             </p>
           </div>
         </div>
@@ -175,10 +163,13 @@ const StakeModal: React.FC<StakeModalProps> = ({
             <div className="flex justify-between items-center mt-2">
               <span className="text-xs text-gray-400">Players:</span>
               <span className="text-xs font-bold text-white">
-                {selectedGame.players.includes(selectedGame.creator)
-                  ? selectedGame.playerCount - 1
-                  : selectedGame.playerCount}
-                /5
+                {selectedGame.playerCount}/6
+              </span>
+            </div>
+            <div className="flex justify-between items-center mt-2">
+              <span className="text-xs text-gray-400">Prize Pool:</span>
+              <span className="text-xs font-bold text-[#FF3B3B]">
+                {(Number(selectedGame.prizePool) / 1e18).toFixed(2)} CELO
               </span>
             </div>
           </div>
@@ -186,11 +177,11 @@ const StakeModal: React.FC<StakeModalProps> = ({
         {txId && (
           <div className="mb-4 p-2 bg-green-900/30 border border-green-500/50 rounded-lg">
             <p className="text-xs text-green-300 text-center font-mono break-all">
-              Transaction: {txId}
+              TX: {(txId as string).slice(0, 10)}...
             </p>
           </div>
         )}
-        {!isSignedIn && (
+        {!isConnected && (
           <div className="mb-4 p-2 bg-yellow-900/30 border border-yellow-500/50 rounded-lg">
             <p className="text-xs text-yellow-300 text-center">
               Please connect your wallet to proceed
@@ -199,12 +190,10 @@ const StakeModal: React.FC<StakeModalProps> = ({
         )}
         <button
           className={`w-full bg-gradient-to-r from-green-600 to-green-500 hover:from-green-700 hover:to-green-600 text-white font-bold py-2 px-4 rounded-xl transition-all duration-300 shadow-lg hover:shadow-green-500/50 ${
-            isPending || !isSignedIn || hasActiveGame(stxAddress || "")
-              ? "opacity-50 cursor-not-allowed"
-              : "hover:scale-105"
+            isPending || !isConnected ? "opacity-50 cursor-not-allowed" : "hover:scale-105"
           }`}
           onClick={handleStake}
-          disabled={isPending || !isSignedIn || hasActiveGame(stxAddress || "")}
+          disabled={isPending}
         >
           {isPending ? (
             <span className="flex items-center justify-center gap-2">
@@ -230,8 +219,10 @@ const StakeModal: React.FC<StakeModalProps> = ({
               </svg>
               Processing...
             </span>
-          ) : (
+          ) : isConnected ? (
             "Stake & Join Game"
+          ) : (
+            "Connect Wallet"
           )}
         </button>
       </div>

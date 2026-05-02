@@ -4,33 +4,31 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Home, Gamepad2, BarChart2, Wallet } from "lucide-react";
 import { useGameStore } from "@/store/gameStore";
-import { useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useEffect } from "react";
 
 export default function Navbar() {
   const pathname = usePathname();
-  const { stxAddress } = useAccount();
+  const { address } = useAccount();
   const { getCurrentActiveGame, myGames } = useGameStore();
 
   const getGameUrl = () => {
-    if (!stxAddress) return "/Home";
-
-    const activeGame = getCurrentActiveGame(stxAddress);
+    if (!address) return "/Home";
+    const activeGame = getCurrentActiveGame(address);
     if (activeGame) {
-      const gameIdStr = activeGame.gameId.toString();
-      return `/GameScreen/${gameIdStr}`;
+      return `/GameScreen/${activeGame.gameId.toString()}`;
     }
-
     return "/Home";
   };
 
   useEffect(() => {
-    if (stxAddress) {
-      const activeGame = getCurrentActiveGame(stxAddress);
+    if (address) {
+      const activeGame = getCurrentActiveGame(address);
       console.log("Navbar: Active Game:", activeGame);
       console.log("Navbar: myGames:", myGames);
     }
-  }, [stxAddress, getCurrentActiveGame, myGames]);
+  }, [address, getCurrentActiveGame, myGames]);
 
   const navItems = [
     { href: "/Home", icon: Home, label: "Home" },
@@ -44,8 +42,7 @@ export default function Navbar() {
       {navItems.map(({ href, icon: Icon, label }) => {
         const isActive =
           pathname === href ||
-          (href.startsWith("/GameScreen/") &&
-            pathname.startsWith("/GameScreen/"));
+          (href.startsWith("/GameScreen/") && pathname.startsWith("/GameScreen/"));
 
         return (
           <Link

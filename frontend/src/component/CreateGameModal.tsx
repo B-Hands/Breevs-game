@@ -4,7 +4,8 @@ import Modal from "@/component/ResuableModal";
 import GlowingEffect from "@/component/GlowingEffectProps";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, useAccount } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
+import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { useCreateGame } from "@/hooks/useGame";
 import { useGameStore } from "@/store/gameStore";
 import { getGameInfo } from "@/lib/contractCalls";
@@ -24,22 +25,24 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
   onClose,
 }) => {
   const router = useRouter();
-  const { isSignedIn } = useAuth();
-  const { stxAddress } = useAccount();
+  const { address, isConnected } = useAccount();
+  const { openConnectModal } = useConnectModal();
   const { mutateAsync: createGame, isPending } = useCreateGame();
   const { setCurrentCreatorGame, getCurrentActiveGame, hasActiveGame } =
     useGameStore();
-  const [stake, setStake] = useState("1");
+
+  // Fixed stake: 1 CELO per the contract
+  const FIXED_STAKE_CELO = "1";
+  const ROUND_DURATION = 600n; // blocks
 
   const handleCreateGame = async () => {
-    if (!isSignedIn || !stxAddress) {
-      showErrorToast("Please connect your Stacks wallet first", "Wallet Error");
+    if (!isConnected || !address) {
+      if (openConnectModal) openConnectModal();
       return;
     }
 
-    // Check if user has any active game
-    if (hasActiveGame(stxAddress)) {
-      const activeGame = getCurrentActiveGame(stxAddress);
+    if (hasActiveGame(address)) {
+      const activeGame = getCurrentActiveGame(address);
       showErrorToast(
         `You have an active game (#${activeGame?.gameId}). Please complete it first.`,
         "Active Game"
@@ -51,26 +54,15 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
       return;
     }
 
-    const stakeValue = Number(stake);
-    if (stakeValue < 0.1 || stakeValue > 100) {
-      showErrorToast("Stake must be between 0.1 and 100 STX", "Invalid Stake");
-      return;
-    }
-
     try {
-      const stakeBigInt = BigInt(Math.floor(stakeValue * 1_000_000));
-      const durationBigInt = BigInt(600);
-
       const { txId, gameId } = await createGame({
-        stake: stakeBigInt,
-        duration: durationBigInt,
-        stxAddress,
+        duration: ROUND_DURATION,
       });
 
       showTransactionToast(
         txId,
         "success",
-        `https://explorer.stacks.co/txid/${txId}?chain=testnet`
+        `https://alfajores.celoscan.io/tx/${txId}`
       );
 
       const gameInfo = await getGameInfo(gameId);
@@ -82,19 +74,12 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
       router.push(`/GameScreen/${gameId}`);
     } catch (err: any) {
       console.error("Create game error:", err);
-
-      const errorMessage = err.message?.includes("User canceled")
-        ? "Transaction canceled by user"
+      const errorMessage = err.message?.includes("rejected")
+        ? "Transaction rejected by user"
         : err.message || "Failed to create game. Please try again.";
       showErrorToast(errorMessage, "Create Game Error");
     }
   };
-
-  useEffect(() => {
-    if (!isOpen) {
-      setStake("1");
-    }
-  }, [isOpen]);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose}>
@@ -123,44 +108,40 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
             Create New Game
           </h2>
           <p className="text-xs text-gray-400">
-            Set your stake and start a new game room
+            Start a new Russian Roulette room on Celo
           </p>
         </div>
 
-        {/* Stake Input */}
+        {/* Fixed Stake Display */}
         <div className="mb-4">
           <label className="block text-xs font-semibold text-[#FF3B3B] mb-2 text-center">
-            Set Stake Amount
+            Required Stake
           </label>
-          <div className="bg-gradient-to-r from-gray-800/80 to-gray-900/80 backdrop-blur-sm p-4 rounded-xl border border-gray-700/50">
-            <input
-              type="number"
-              value={stake}
-              onChange={(e) => setStake(e.target.value)}
-              min="0.1"
-              max="100"
-              step="0.1"
-              className="w-full bg-transparent text-white text-center text-2xl font-bold focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-              placeholder="1.0"
-              disabled={isPending}
-            />
-            <p className="text-xs text-gray-400 mt-2 text-center font-semibold">
-              STX
-            </p>
+          <div className="bg-gradient-to-r from-gray-800/80 to-gray-900/80 backdrop-blur-sm p-4 rounded-xl border border-gray-700/50 text-center">
+            <p className="text-3xl font-bold text-white">{FIXED_STAKE_CELO}</p>
+            <p className="text-xs text-gray-400 mt-1 font-semibold">CELO</p>
           </div>
         </div>
 
         {/* Info Text */}
         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-4">
           <p className="text-xs text-blue-200 text-center">
-            💡 Players will need to stake{" "}
-            <span className="text-[#FF3B3B] font-bold">{stake} STX</span> to
-            join your game
+            💡 Each player must stake{" "}
+            <span className="text-[#FF3B3B] font-bold">1 CELO</span> to join.
+            Winner takes all 6 CELO!
+          </p>
+        </div>
+
+        {/* Host balance requirement */}
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-4">
+          <p className="text-xs text-yellow-200 text-center">
+            ⚠️ Host wallet must hold at least{" "}
+            <span className="text-yellow-300 font-bold">5 CELO</span>
           </p>
         </div>
 
         {/* Wallet Warning */}
-        {!isSignedIn && (
+        {!isConnected && (
           <div className="mb-4 p-2 bg-yellow-900/30 border border-yellow-500/50 rounded-lg">
             <p className="text-xs text-yellow-300 text-center">
               Please connect your wallet to proceed
@@ -171,12 +152,12 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
         {/* Action Button */}
         <button
           className={`w-full bg-gradient-to-r from-red-600 to-red-500 hover:from-red-700 hover:to-red-600 text-white font-bold py-2 px-4 rounded-xl transition-all duration-300 shadow-lg hover:shadow-red-500/50 ${
-            isPending || !isSignedIn
+            isPending || !isConnected
               ? "opacity-50 cursor-not-allowed"
               : "hover:scale-105"
           }`}
           onClick={handleCreateGame}
-          disabled={isPending || !isSignedIn}
+          disabled={isPending}
         >
           {isPending ? (
             <span className="flex items-center justify-center gap-2">
@@ -202,8 +183,10 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
               </svg>
               Creating Game...
             </span>
+          ) : isConnected ? (
+            "Create Game Room (1 CELO)"
           ) : (
-            "Create Game Room"
+            "Connect Wallet"
           )}
         </button>
       </div>

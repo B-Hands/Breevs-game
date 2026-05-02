@@ -4,7 +4,7 @@ import { useRouter, useParams } from "next/navigation";
 import { useEffect } from "react";
 import WheelOfFortune from "@/component/WheelOfFortune";
 import { useGameStore } from "@/store/gameStore";
-import { useAccount, useAuth } from "@micro-stacks/react";
+import { useAccount } from "wagmi";
 import { GameStatus } from "@/lib/contractCalls";
 import BackgroundImgBlur from "@/component/BackgroundBlur";
 import Link from "next/link";
@@ -12,12 +12,11 @@ import Link from "next/link";
 export default function GameScreen() {
   const router = useRouter();
   const { gameId: gameIdStr } = useParams();
-  const { stxAddress } = useAccount();
-  const { isSignedIn } = useAuth();
+  const { address, isConnected } = useAccount();
   const { currentPlayerGame, currentCreatorGame } = useGameStore();
 
   useEffect(() => {
-    if (!isSignedIn || !stxAddress) {
+    if (!isConnected || !address) {
       router.push("/Home");
       return;
     }
@@ -38,8 +37,8 @@ export default function GameScreen() {
     gameIdStr,
     currentPlayerGame,
     currentCreatorGame,
-    isSignedIn,
-    stxAddress,
+    isConnected,
+    address,
     router,
   ]);
 
