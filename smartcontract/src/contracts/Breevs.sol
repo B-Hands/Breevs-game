@@ -1,77 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-interface IRandom {
-    /**
-     * @notice Returns the most-recently revealed on-chain random value.
-     *         This value is updated every block by the RANDAO commit-reveal
-     *         scheme built into the Celo protocol – validators commit to a
-     *         random value one block ahead and reveal it in the next, making
-     *         it impossible to predict before the block is finalised.
-     */
-    function random() external view returns (bytes32);
-
-    /**
-     * @notice Returns the revealed randomness for a specific block number.
-     *         Useful when you want to pin randomness to a past block.
-     */
-    function getBlockRandomness(
-        uint256 blockNumber
-    ) external view returns (bytes32);
-}
-
-interface IRegistry {
-    function getAddressFor(bytes32 identifier) external view returns (address);
-}
-
-/**
- * @title Breevs Russian Roulette – Celo VRF Edition
- * @notice Russian-roulette elimination game using Celo's native on-chain
- *         randomness (RANDAO commit-reveal) instead of predictable block hashes.
- *
- * HOW THE RANDOMNESS WORKS
- * ────────────────────────
- * 1. When the host calls `requestSpin()`, the contract records the *current*
- *    block number as the "commitment block" for that spin.
- * 2. The spin CANNOT be resolved in the same block – the host must wait at
- *    least REVEAL_DELAY blocks (default 1) so the RANDAO value for the
- *    commitment block is finalised and published on-chain.
- * 3. The host (or anyone) then calls `resolveSpin()`, which fetches the
- *    committed block's revealed randomness from the Celo Random contract,
- *    mixes it with additional entropy (game ID, round, player addresses),
- *    and selects the eliminated player.
- *
- * WHY THIS IS SAFER THAN block.number / blockhash
- * ─────────────────────────────────────────────────
- * • The RANDAO value is committed one block before it is revealed, so the
- *   host cannot know the value at request time.
- * • Validators only have "1 bit of influence": they can skip proposing a
- *   block, but that hands control to the next validator, so the cost of
- *   manipulation is high.
- * • The extra salt (gameId, round, player list hash) makes it impossible to
- *   reuse the same random seed across different spins even in the same block.
- *
- * DEPLOY PARAMETERS
- * ─────────────────
- * constructor(address _randomContractAddress)
- *   • Alfajores testnet Random contract: 0x006b86B273FF9e20E67B72E92E3Ea11AB35CD59b
- *     (look up current address via IRegistry at 0x000000000000000000000000000000000000ce10)
- *   • Mainnet: resolve via registry as shown in celoRandomAddress() helper below.
- */
 contract BreevsRussianRoulette {
     // ─── Constants ───────────────────────────────────────────────────────────
 
     uint256 public constant MAX_PLAYERS = 6;
-    uint256 public constant MIN_STAKE = 1e18; // 1 CELO
-    uint256 public constant MAX_STAKE = 1e18; // 1 CELO
+    uint256 public constant MIN_PLAYER_STAKE = 1e18; // Minimum stake: 1 CELO
+    uint256 public constant MAX_PLAYER_STAKE = 1000e18; // Maximum stake: 1000 CELO
+    uint256 public constant HOST_BALANCE_MULTIPLIER = 5; // Host wallet must hold >= 5x the player stake
     uint256 public constant MIN_ROUND_DURATION = 10; // blocks
     uint256 public constant MAX_ROUND_DURATION = 1000; // blocks
-    uint256 public constant MIN_HOST_BALANCE = 5e18; // 5 CELO
-    uint256 public constant REVEAL_DELAY = 1; // blocks to wait before resolving a spin
-
-    // Celo core registry – same address on every Celo network
-    address private constant CELO_REGISTRY =
-        0x000000000000000000000000000000000000ce10;
 
     // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -106,13 +44,6 @@ contract BreevsRussianRoulette {
         uint256 totalStaked;
     }
 
-    /// @dev Tracks a pending VRF-style spin request
-    struct SpinRequest {
-        bool pending; // true while waiting to be resolved
-        uint256 commitBlock; // block whose RANDAO we will use
-        uint256 round; // game round this spin belongs to
-    }
-
     // ─── State ───────────────────────────────────────────────────────────────
 
     uint256 public gameCounter;
@@ -124,22 +55,11 @@ contract BreevsRussianRoulette {
     mapping(uint256 => bool) public prizeClaimed;
     mapping(address => UserStats) public userStats;
 
-    /// @dev One pending spin per game at a time
-    mapping(uint256 => SpinRequest) public pendingSpins;
-
-    /// @dev Injected at deploy time so it can be set per-network / mocked in tests
-    IRandom public immutable randomContract;
-
     // ─── Events ──────────────────────────────────────────────────────────────
 
     event GameCreated(uint256 indexed gameId);
     event PlayerJoined(uint256 indexed gameId, address player);
     event GameStarted(uint256 indexed gameId);
-    event SpinRequested(
-        uint256 indexed gameId,
-        uint256 commitBlock,
-        uint256 round
-    );
     event PlayerEliminated(
         uint256 indexed gameId,
         address player,
@@ -150,59 +70,53 @@ contract BreevsRussianRoulette {
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
-    /**
-     * @param _randomContractAddress  Address of the Celo Random core contract.
-     *        Pass address(0) to auto-resolve via the Celo Registry (mainnet only).
-     */
-    constructor(address _randomContractAddress) {
-        if (_randomContractAddress == address(0)) {
-            // Auto-resolve from registry (works on mainnet; may fail on testnets
-            // if the registry is not yet deployed at the canonical address).
-            address resolved = IRegistry(CELO_REGISTRY).getAddressFor(
-                keccak256(abi.encodePacked("Random"))
-            );
-            require(
-                resolved != address(0),
-                "Random contract not found in registry"
-            );
-            randomContract = IRandom(resolved);
-        } else {
-            randomContract = IRandom(_randomContractAddress);
-        }
-    }
+    // No constructor needed - no external dependencies
 
     // ═══════════════════════════════════════════════════════════════════════════
     //  GAME MANAGEMENT
     // ═══════════════════════════════════════════════════════════════════════════
 
     function createGame(
-        uint256 stake,
+        uint256 playerStake,
         uint256 roundDuration
     ) external payable returns (uint256) {
-        require(stake == MIN_STAKE, "Stake must be exactly 1 CELO");
+        require(
+            playerStake >= MIN_PLAYER_STAKE && playerStake <= MAX_PLAYER_STAKE,
+            "Stake must be between 1 and 1000 CELO"
+        );
         require(
             roundDuration >= MIN_ROUND_DURATION &&
                 roundDuration <= MAX_ROUND_DURATION,
             "Invalid duration"
         );
-        require(msg.value == MIN_STAKE, "Must send exactly 1 CELO as stake");
+
+        // Host deposits the same stake as every other player
         require(
-            address(msg.sender).balance >= MIN_HOST_BALANCE,
-            "Host must hold at least 5 CELO"
+            msg.value == playerStake,
+            "Host deposit must equal the player stake"
+        );
+
+        // Host wallet must hold at least 5x the player stake.
+        // msg.value is added back because the EVM deducts it from sender
+        // balance before this code runs.
+        require(
+            address(msg.sender).balance + msg.value >=
+                HOST_BALANCE_MULTIPLIER * playerStake,
+            "Host wallet must hold at least 5x the player stake"
         );
 
         gameCounter++;
         Game storage g = games[gameCounter];
         g.creator = msg.sender;
-        g.stake = MIN_STAKE;
-        g.prizePool = MIN_STAKE;
+        g.stake = playerStake;
+        g.prizePool = playerStake;
         g.status = Status.CREATED;
         g.roundDuration = roundDuration;
 
         g.players.push(msg.sender);
         playerGameData[gameCounter][msg.sender] = PlayerGameData(false, 0);
-        playerDeposits[gameCounter][msg.sender] = MIN_STAKE;
-        _updateUserStatsOnJoin(msg.sender, MIN_STAKE);
+        playerDeposits[gameCounter][msg.sender] = playerStake;
+        _updateUserStatsOnJoin(msg.sender, playerStake);
 
         emit GameCreated(gameCounter);
         return gameCounter;
@@ -213,14 +127,13 @@ contract BreevsRussianRoulette {
         require(g.status == Status.CREATED, "Game not joinable");
         require(g.players.length < MAX_PLAYERS, "Game is full");
         require(!_isUserInGame(gameId, msg.sender), "Already in game");
-        require(msg.value == MIN_STAKE, "Must send exactly 1 CELO");
-        require(g.stake == MIN_STAKE, "Game stake must be 1 CELO");
+        require(msg.value == g.stake, "Must send exactly the game stake");
 
         g.players.push(msg.sender);
-        g.prizePool += MIN_STAKE;
+        g.prizePool += g.stake;
         playerGameData[gameId][msg.sender] = PlayerGameData(false, 0);
-        playerDeposits[gameId][msg.sender] = MIN_STAKE;
-        _updateUserStatsOnJoin(msg.sender, MIN_STAKE);
+        playerDeposits[gameId][msg.sender] = g.stake;
+        _updateUserStatsOnJoin(msg.sender, g.stake);
 
         emit PlayerJoined(gameId, msg.sender);
     }
@@ -239,108 +152,56 @@ contract BreevsRussianRoulette {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  VRF-STYLE SPIN MECHANICS  (two-step: request → resolve)
+    //  SPIN — single-step random elimination
     // ═══════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice STEP 1 – Host submits a spin request.
+     * @notice Host spins the chamber. One active player is randomly eliminated
+     *         immediately. The randomness is derived from block data available
+     *         at the time of the call — simple and gas-efficient.
      *
-     *         The contract records `block.number` as the "commit block".
-     *         The RANDAO randomness for that block has NOT yet been revealed
-     *         (it is revealed when the NEXT block is proposed), so the host
-     *         cannot predict the outcome at this point.
-     *
-     *         Must be called while the round is still open.
+     *         Must be called while the round window is still open.
      */
-    function requestSpin(uint256 gameId) external {
+    function spin(uint256 gameId) external {
         Game storage g = games[gameId];
         require(msg.sender == g.creator, "Only host can spin");
         require(g.status == Status.IN_PROGRESS, "Game not in progress");
         require(block.number <= g.roundEnd, "Round has expired");
-        require(!pendingSpins[gameId].pending, "Spin already pending");
 
         address[] memory active = _getActivePlayers(gameId);
         require(active.length > 1, "Only one player left");
 
-        pendingSpins[gameId] = SpinRequest({
-            pending: true,
-            commitBlock: block.number,
-            round: g.currentRound
-        });
-
-        emit SpinRequested(gameId, block.number, g.currentRound);
-    }
-
-    /**
-     * @notice STEP 2 – Anyone resolves the pending spin after REVEAL_DELAY blocks.
-     *
-     *         The contract fetches the Celo RANDAO randomness that was revealed
-     *         for the commit block, combines it with additional game-specific
-     *         entropy, and uses the result to pick the eliminated player.
-     *
-     *         By waiting REVEAL_DELAY blocks the randomness is finalised and
-     *         the host cannot selectively include / exclude their own transaction
-     *         to bias the outcome.
-     */
-    function resolveSpin(uint256 gameId) external {
-        Game storage g = games[gameId];
-        SpinRequest storage req = pendingSpins[gameId];
-
-        require(req.pending, "No pending spin");
-        require(g.status == Status.IN_PROGRESS, "Game not in progress");
-        require(
-            block.number >= req.commitBlock + REVEAL_DELAY,
-            "Must wait for RANDAO reveal"
-        );
-        // Safety: if the commit block is too old the RANDAO value may no
-        // longer be stored. 256 blocks is the EVM's blockhash window; Celo's
-        // Random contract retains history longer, but we cap at 200 for safety.
-        require(
-            block.number <= req.commitBlock + 200,
-            "Spin request expired – request a new spin"
-        );
-
-        // ── Fetch RANDAO randomness for the committed block ──────────────────
-        bytes32 celoRandom = randomContract.getBlockRandomness(req.commitBlock);
-        require(
-            celoRandom != bytes32(0),
-            "RANDAO not available for that block"
-        );
-
-        // ── Mix with game-specific entropy to prevent cross-game reuse ────────
-        address[] memory active = _getActivePlayers(gameId);
-        require(active.length > 1, "Only one player left");
-
-        bytes32 seed = keccak256(
-            abi.encodePacked(
-                celoRandom, // Celo RANDAO – unmanipulable by host
-                gameId, // unique per game
-                req.round, // unique per round
-                req.commitBlock, // block the commitment was made
-                _hashPlayers(active) // current active player set
+        // Random index derived from block data + game-specific values.
+        // Not cryptographically unpredictable, but sufficient for a
+        // social/entertainment game where the host triggers spins live.
+        uint256 seed = uint256(
+            keccak256(
+                abi.encodePacked(
+                    blockhash(block.number - 1), // previous block hash
+                    block.timestamp, // current block timestamp
+                    gameId, // unique per game
+                    g.currentRound, // unique per round
+                    active.length, // number of players still alive
+                    msg.sender // host address
+                )
             )
         );
 
-        uint256 victimIdx = uint256(seed) % active.length;
+        uint256 victimIdx = seed % active.length;
         address victim = active[victimIdx];
 
-        // ── Clear the pending spin before state changes (re-entrancy guard) ──
-        delete pendingSpins[gameId];
-
-        // ── Eliminate the chosen player ───────────────────────────────────────
         _eliminatePlayer(gameId, victim);
         emit PlayerEliminated(gameId, victim, g.currentRound);
     }
 
     /**
-     * @notice Advance to the next round once the current round's time has elapsed.
-     *         If only one player remains the game is completed automatically.
+     * @notice Advance to the next round once the current round time has elapsed.
+     *         If only one player remains the game completes automatically.
      */
     function advanceRound(uint256 gameId) external {
         Game storage g = games[gameId];
         require(g.status == Status.IN_PROGRESS, "Not in progress");
         require(block.number > g.roundEnd, "Round not ended yet");
-        require(!pendingSpins[gameId].pending, "Resolve pending spin first");
 
         address[] memory active = _getActivePlayers(gameId);
         if (active.length <= 1) {
@@ -375,26 +236,14 @@ contract BreevsRussianRoulette {
     //  VIEW HELPERS
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @notice Returns all active (non-eliminated) players for a game.
     function getActivePlayers(
         uint256 gameId
     ) external view returns (address[] memory) {
         return _getActivePlayers(gameId);
     }
 
-    /// @notice Returns the pending spin request for a game (if any).
-    function getPendingSpin(
-        uint256 gameId
-    ) external view returns (SpinRequest memory) {
-        return pendingSpins[gameId];
-    }
-
-    /**
-     * @notice Helper to resolve the Celo Random contract address on-chain.
-     *         You can call this after deployment to verify the address used.
-     */
-    function celoRandomAddress() external view returns (address) {
-        return address(randomContract);
+    function getGame(uint256 gameId) external view returns (Game memory) {
+        return games[gameId];
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -430,19 +279,11 @@ contract BreevsRussianRoulette {
         return active;
     }
 
-    /// @dev Deterministic hash of the active player list used as extra entropy.
-    function _hashPlayers(
-        address[] memory players
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(players));
-    }
-
     function _eliminatePlayer(uint256 gameId, address player) internal {
         playerGameData[gameId][player].eliminated = true;
         playerGameData[gameId][player].eliminationRound = games[gameId]
             .currentRound;
 
-        // Auto-complete if one player remains
         address[] memory active = _getActivePlayers(gameId);
         if (active.length == 1) {
             _completeGame(gameId);
@@ -473,7 +314,6 @@ contract BreevsRussianRoulette {
         s.totalWinnings += winnings;
     }
 
-    // Reject accidental ETH sends
     receive() external payable {
         revert("Use joinGame or createGame");
     }

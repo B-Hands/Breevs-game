@@ -1,23 +1,19 @@
-
 {
-  "name": "counter-tests",
+  "name": "breevs-russian-roulette",
   "version": "1.0.0",
-  "description": "Run unit tests on this project.",
+  "description": "Deploy scripts for BreevsRussianRoulette smart contract",
   "type": "module",
-  "private": true,
   "scripts": {
-    "test": "vitest run",
-    "test:report": "vitest run -- --coverage --costs",
-    "test:watch": "chokidar \"tests/**/*.ts\" \"contracts/**/*.clar\" -c \"npm run test:report\""
+    "compile": "hardhat compile",
+    "deploy:local": "hardhat run scripts/deploy.cjs --network hardhat",
+    "deploy:sepolia": "hardhat run scripts/deploy.cjs --network celo-sepolia",
+    "deploy:mainnet": "hardhat run scripts/deploy.cjs --network celo-mainnet",
+    "verify:sourcify": "node scripts/verify-sourcify.cjs",
+    "test": "hardhat test"
   },
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@hirosystems/clarinet-sdk": "^3.6.0",
-    "@types/node": "^24.4.0",
-    "@stacks/transactions": "^7.2.0",
-    "chokidar-cli": "^3.0.0",
-    "vitest": "^3.2.4",
-    "vitest-environment-clarinet": "^2.3.0"
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "dotenv": "^16.0.0",
+    "hardhat": "^2.22.0"
   }
 }
