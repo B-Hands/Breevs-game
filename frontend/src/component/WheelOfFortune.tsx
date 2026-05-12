@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAccount } from "wagmi";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { Open_Sans } from "next/font/google";
@@ -17,6 +17,7 @@ import {
   usePendingSpin,
 } from "@/hooks/useGame";
 import { GameStatus, getCeloBlockNumber, publicClient, CONTRACT_ADDRESS, BREEVS_ABI } from "@/lib/contractCalls";
+import { formatEther, parseAbiItem } from "viem";
 import BackgroundImgBlur from "@/component/BackgroundBlur";
 import Link from "next/link";
 import StakeModal from "@/component/StakeModal";
@@ -53,8 +54,13 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastEliminatedPlayer, setLastEliminatedPlayer] = useState<string | null>(null);
+  // eliminatedMap: lowercaseAddr -> round number (populated from on-chain events)
+  const [eliminatedMap, setEliminatedMap] = useState<Map<string, number>>(new Map());
+  // stable name + address registry persisted across renders
+  const playerInfoRef = useRef(new Map<string, { addr: string; name: string }>());
   const [currentBlockNumber, setCurrentBlockNumber] = useState<number>(0);
   const [showCommentary, setShowCommentary] = useState(false);
+  const [commentaryTrigger, setCommentaryTrigger] = useState(0);
 
   const { address, isConnected } = useAccount();
   const { openConnectModal } = useConnectModal();
@@ -76,7 +82,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
   const { mutateAsync: resolveSpin, isPending: isResolvingTx } = useResolveSpin();
   const { mutateAsync: advanceRound, isPending: isAdvancing } = useAdvanceRound();
   const { mutateAsync: claimPrize, isPending: isClaiming } = useClaimPrize();
-  const { data: isPrizeClaimed, isLoading: loadingClaim } = useIsPrizeClaimed(gameId, address || "");
+  const { data: isPrizeClaimed } = useIsPrizeClaimed(gameId, address || "");
 
   if (!gameId) {
     return (
@@ -94,22 +100,111 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
     );
   }
 
+  // Build stable name registry from PlayerJoined events + fetch past eliminations
+  useEffect(() => {
+    if (!gameId || !game?.creator || currentBlockNumber === 0) return;
+    const infoMap = playerInfoRef.current;
+    // Use a recent window to avoid RPC block-range limits
+    const fromBlock = BigInt(Math.max(0, currentBlockNumber - 50000));
+    Promise.all([
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: parseAbiItem("event PlayerJoined(uint256 indexed gameId, address player)"),
+        fromBlock,
+        toBlock: "latest",
+      }),
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: parseAbiItem("event PlayerEliminated(uint256 indexed gameId, address player, uint256 round)"),
+        fromBlock,
+        toBlock: "latest",
+      }),
+    ])
+      .then(([joinLogs, elimLogs]) => {
+        // Creator is always first player (index 0 → "Host")
+        const creatorKey = game.creator.toLowerCase();
+        if (!infoMap.has(creatorKey))
+          infoMap.set(creatorKey, { addr: game.creator, name: "Host" });
+
+        // Subsequent players in join order → "Player 2", "Player 3", …
+        let joinIdx = 0;
+        (joinLogs as any[]).forEach((log) => {
+          if ((log.args.gameId as bigint) !== gameId) return;
+          const addr: string = log.args.player;
+          const key = addr.toLowerCase();
+          if (!infoMap.has(key))
+            infoMap.set(key, { addr, name: `Player ${joinIdx + 2}` });
+          joinIdx++;
+        });
+
+        // Seed eliminated map from historical events
+        const map = new Map<string, number>();
+        (elimLogs as any[]).forEach((log) => {
+          if ((log.args.gameId as bigint) !== gameId) return;
+          const addr: string = log.args.player;
+          const round: bigint = log.args.round;
+          map.set(addr.toLowerCase(), Number(round));
+          const key = addr.toLowerCase();
+          if (!infoMap.has(key)) {
+            const idx = infoMap.size;
+            infoMap.set(key, { addr, name: `Player ${idx + 1}` });
+          }
+        });
+        if (map.size > 0) setEliminatedMap(map);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameId, game?.creator, currentBlockNumber === 0]);
+
   const updatePlayers = useCallback(() => {
-    if (!game || !game.players) return;
-    const formattedPlayers: Player[] = game.players.map((addr, index) => {
-      const isCreator = addr.toLowerCase() === game.creator.toLowerCase();
-      const name = isCreator ? "Host" : `Player ${index + 1}`;
+    if (!game) return;
+    const infoMap = playerInfoRef.current;
+
+    // Also register any active players we haven't seen yet
+    game.players.forEach((addr, index) => {
+      const key = addr.toLowerCase();
+      if (!infoMap.has(key)) {
+        const isCreator = game.creator && addr.toLowerCase() === game.creator.toLowerCase();
+        infoMap.set(key, {
+          addr,
+          name: isCreator ? "Host" : `Player ${index + 1}`,
+        });
+      }
+    });
+
+    // All unique player keys: combine active list + event-tracked eliminated
+    // eliminatedMap takes priority — a player in it is always "Eliminated"
+    // regardless of whether stale game.players still includes them
+    const activeLower = game.players.map((a) => a.toLowerCase());
+    const elimKeys = [...eliminatedMap.keys()];
+    const allKeys = [...new Set([...activeLower, ...elimKeys])];
+
+    const formattedPlayers: Player[] = allKeys.map((key) => {
+      const info = infoMap.get(key);
+      const addr = info?.addr ?? game.players.find((a) => a.toLowerCase() === key) ?? key;
+      const name = info?.name ?? "Player ?";
+      // eliminatedMap wins over game.players — handles stale RPC data
+      const isEliminated = eliminatedMap.has(key);
+      const eliminationRound = eliminatedMap.get(key);
+
       if (game.status === GameStatus.Ended && game.winner) {
-        const isWinner = addr.toLowerCase() === game.winner.toLowerCase();
+        const isWinner = key === game.winner.toLowerCase();
         return {
           name,
           address: addr,
-          status: isWinner ? "Still in" : "Eliminated",
-          eliminatedInRound: !isWinner ? game.currentRound : undefined,
+          status: (isWinner ? "Still in" : "Eliminated") as "Still in" | "Eliminated",
+          eliminatedInRound: !isWinner ? (eliminationRound ?? game.currentRound) : undefined,
         };
       }
-      return { name, address: addr, status: "Still in" };
+
+      return {
+        name,
+        address: addr,
+        status: (isEliminated ? "Eliminated" : "Still in") as "Still in" | "Eliminated",
+        eliminatedInRound: eliminationRound,
+      };
     });
+
     setPlayers(formattedPlayers);
     if (game.status === GameStatus.Ended && game.winner) {
       const winnerPlayer = formattedPlayers.find(
@@ -117,7 +212,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       );
       if (winnerPlayer) setWinner(winnerPlayer.name);
     }
-  }, [game]);
+  }, [game, eliminatedMap]);
 
   useEffect(() => { updatePlayers(); }, [updatePlayers]);
 
@@ -131,7 +226,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       } catch {}
     };
     fetch();
-    const iv = setInterval(fetch, 12000); // ~Celo block time
+    const iv = setInterval(fetch, 5000); // Celo Sepolia ~5s blocks
     return () => { isMounted = false; clearInterval(iv); };
   }, []);
 
@@ -152,6 +247,34 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
     if (success) { const t = setTimeout(() => setSuccess(null), 5000); return () => clearTimeout(t); }
   }, [success]);
 
+  // Watch for live PlayerEliminated events
+  useEffect(() => {
+    const unwatch = publicClient.watchContractEvent({
+      address: CONTRACT_ADDRESS,
+      abi: BREEVS_ABI,
+      eventName: "PlayerEliminated",
+      onLogs: (logs: any[]) => {
+        logs.forEach((log: any) => {
+          const args = log.args as { gameId: bigint; player: string; round: bigint };
+          if (args.gameId === gameId) {
+            setLastEliminatedPlayer(args.player);
+            setEliminatedMap((prev) => {
+              const next = new Map(prev);
+              next.set(args.player.toLowerCase(), Number(args.round));
+              return next;
+            });
+            const key = args.player.toLowerCase();
+            if (!playerInfoRef.current.has(key)) {
+              const idx = playerInfoRef.current.size;
+              playerInfoRef.current.set(key, { addr: args.player, name: `Player ${idx + 1}` });
+            }
+          }
+        });
+      },
+    });
+    return () => unwatch();
+  }, [gameId]);
+
   // Watch for PrizeClaimed events
   useEffect(() => {
     const unwatch = publicClient.watchContractEvent({
@@ -166,7 +289,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
               ...prev,
               {
                 address: args.winner,
-                amount: `${(Number(args.amount) / 1e18).toFixed(2)} CELO`,
+                amount: `${formatEther(args.amount)} CELO`,
               },
             ]);
           }
@@ -207,6 +330,8 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       await refreshGameState();
       showSuccess("🎮 Game started! Round 1 begins!");
       setIsProcessing(false);
+      setShowCommentary(true);
+      setCommentaryTrigger((n) => n + 1);
     } catch (err: any) {
       showError(err.message || "Failed to start game");
     }
@@ -248,7 +373,6 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       await resolveSpin({ gameId });
 
       // Animate the wheel
-      const remaining = players.filter((p) => p.status === "Still in");
       const totalSpins = 5 + Math.random() * 3;
       const finalAngle = 360 * totalSpins;
       let cur = rotation;
@@ -256,7 +380,6 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       for (let i = 0; i <= steps; i++) {
         await new Promise((res) => setTimeout(res, 60));
         const prog = i / steps;
-        const decel = 1 - Math.pow(1 - prog, 2);
         cur += (finalAngle / steps) * (1 - prog * 0.7);
         setRotation(cur);
       }
@@ -265,6 +388,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
       setIsSpinning(false);
       setIsProcessing(false);
       setShowCommentary(true);
+      setCommentaryTrigger((n) => n + 1);
       showSuccess("❌ Player eliminated!");
     } catch (err: any) {
       showError(err.message || "Failed to resolve spin");
@@ -319,10 +443,13 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
     if (game) { setSelectedGame(game); setIsStakeModalOpen(true); }
   };
 
+  const isCreator = !!address && !!game?.creator && address.toLowerCase() === game.creator.toLowerCase();
+
   const getGameStatusText = () => {
     if (!game || isLoadingStatus) return "Loading...";
     switch (game.status) {
-      case GameStatus.Active: return "Waiting for Players";
+      case GameStatus.Active:
+        return game.playerCount === 6 ? "Ready to Start" : `Waiting for Players (${game.playerCount}/6)`;
       case GameStatus.InProgress: return `In Progress – Round ${game.currentRound}`;
       case GameStatus.Ended: return "Game Ended";
       default: return "Unknown";
@@ -343,7 +470,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
     address?.toLowerCase() === game?.creator.toLowerCase() &&
     !pendingSpin?.pending &&
     !isSpinning && !isRequestingTx && !isProcessing &&
-    (currentBlockNumber === 0 || currentBlockNumber < Number(game?.roundEnd));
+    (currentBlockNumber === 0 || currentBlockNumber <= Number(game?.roundEnd));
 
   const canResolveSpin = () =>
     game?.status === GameStatus.InProgress &&
@@ -355,7 +482,9 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
     game?.status === GameStatus.InProgress &&
     isConnected &&
     address?.toLowerCase() === game?.creator.toLowerCase() &&
-    (currentBlockNumber === 0 || currentBlockNumber >= Number(game?.roundEnd)) &&
+    currentBlockNumber > 0 &&
+    currentBlockNumber > Number(game?.roundEnd) &&
+    !pendingSpin?.pending &&
     !isAdvancing && !isProcessing;
 
   const canClaimPrize = () =>
@@ -485,12 +614,20 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
           )}
         </AnimatePresence>
 
-        {/* Claude AI Commentary Box */}
-        <AICommentaryBox
-          gameId={gameId}
-          isVisible={showCommentary}
-          onClose={() => setShowCommentary(false)}
-        />
+        {/* Russian Roulette AI — auto-pops on game events */}
+        {showCommentary && (
+          <AICommentaryBox
+            gameId={gameId}
+            eventTrigger={commentaryTrigger}
+            onClose={() => setShowCommentary(false)}
+            currentRound={game?.currentRound}
+            activePlayers={game?.playerCount}
+            totalPlayers={6}
+            eliminatedCount={eliminatedMap.size}
+            lastEliminatedAddress={lastEliminatedPlayer}
+            prizePool={game ? (Number(game.prizePool) / 1e18).toFixed(2) : undefined}
+          />
+        )}
 
         {/* Main content */}
         <div className="flex-1 overflow-y-auto">
@@ -525,17 +662,25 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
 
                   {/* Pending spin indicator */}
                   {pendingSpin?.pending && (
-                    <div className="mb-3 p-2 bg-orange-500/10 border border-orange-500/30 rounded-lg">
-                      <p className="text-xs text-orange-300 font-semibold">
-                        ⌛ Spin pending – commit block #{Number(pendingSpin.commitBlock)}
-                      </p>
+                    <>
+                      {/* Waiting for 1 block */}
                       {currentBlockNumber > 0 && currentBlockNumber <= Number(pendingSpin.commitBlock) && (
-                        <p className="text-xs text-gray-400 mt-1">Waiting for RANDAO reveal…</p>
+                        <div className="mb-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg text-center">
+                          <p className="text-xs text-orange-300 font-semibold">⌛ Waiting for RANDAO reveal…</p>
+                          <p className="text-[10px] text-gray-400 mt-1">1 more block (~5 sec)</p>
+                        </div>
                       )}
-                      {currentBlockNumber > Number(pendingSpin.commitBlock) && (
-                        <p className="text-xs text-green-300 mt-1">✅ Ready to resolve!</p>
+                      {/* Ready to resolve — big pulsing button */}
+                      {(currentBlockNumber === 0 || currentBlockNumber > Number(pendingSpin.commitBlock)) && (
+                        <button
+                          onClick={resolveSpinAction}
+                          disabled={isResolvingTx || isProcessing}
+                          className="mb-3 w-full py-3 rounded-xl font-bold text-base text-white animate-pulse bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 shadow-lg shadow-green-500/40 disabled:opacity-50 disabled:cursor-not-allowed disabled:animate-none"
+                        >
+                          {isResolvingTx || isProcessing ? "⏳ Resolving..." : "🎯 GO! — Resolve Spin"}
+                        </button>
                       )}
-                    </div>
+                    </>
                   )}
 
                   {game?.status === GameStatus.InProgress && game.roundEnd && (
@@ -563,7 +708,7 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
                       <div className="col-span-2 bg-gradient-to-r from-[#FF3B3B]/20 to-purple-500/20 rounded-lg p-2 border border-[#FF3B3B]/30">
                         <p className="text-xs text-gray-400">Prize Pool</p>
                         <p className="text-lg sm:text-xl font-bold text-[#FF3B3B]">
-                          {(Number(game.prizePool) / 1e18).toFixed(2)} CELO
+                          {formatEther(game.prizePool)} CELO
                         </p>
                       </div>
                     </div>
@@ -572,6 +717,23 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
                   {!isConnected && (
                     <div className="mb-3 p-2 bg-yellow-900/30 border border-yellow-500/50 rounded-lg">
                       <p className="text-xs text-yellow-300">Connect wallet to interact</p>
+                    </div>
+                  )}
+
+                  {/* Non-creator player info */}
+                  {isConnected && !isCreator && game?.status === GameStatus.Active && game.playerCount === 6 && (
+                    <div className="mb-3 p-3 bg-blue-900/30 border border-blue-500/40 rounded-lg">
+                      <p className="text-xs text-blue-200 text-center">
+                        ⏳ Waiting for the <span className="font-bold text-white">Host</span> to start the game.
+                      </p>
+                    </div>
+                  )}
+                  {isConnected && !isCreator && game?.status === GameStatus.InProgress && (
+                    <div className="mb-3 p-3 bg-purple-900/30 border border-purple-500/40 rounded-lg">
+                      <p className="text-xs text-purple-200 text-center">
+                        🎡 The <span className="font-bold text-white">Host</span> controls the spin.<br/>
+                        Watch the wheel — you could be eliminated!
+                      </p>
                     </div>
                   )}
 
@@ -635,13 +797,13 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
                       </div>
                     )}
 
-                    {/* AI Commentary trigger button */}
-                    {game?.status === GameStatus.InProgress && (
+                    {/* Re-open AI commentary if user closed it */}
+                    {game?.status === GameStatus.InProgress && !showCommentary && (
                       <button
-                        onClick={() => setShowCommentary(true)}
-                        className="w-full bg-gradient-to-r from-violet-800 to-purple-700 hover:brightness-110 text-white font-bold py-2 px-4 rounded-lg transition-all text-sm shadow-lg flex items-center justify-center gap-2"
+                        onClick={() => { setShowCommentary(true); setCommentaryTrigger((n) => n + 1); }}
+                        className="w-full bg-gradient-to-r from-red-900/60 to-violet-900/60 hover:brightness-110 text-white font-bold py-2 px-4 rounded-lg transition-all text-sm border border-red-500/30 flex items-center justify-center gap-2"
                       >
-                        🤖 Claude AI Commentary
+                        🎰 Russian Roulette AI
                       </button>
                     )}
                   </div>
@@ -675,11 +837,30 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
                           ? "bg-white text-black hover:bg-gray-200 hover:scale-110"
                           : canResolveSpin()
                           ? "bg-green-400 text-black hover:bg-green-300 hover:scale-110"
+                          : canStartGame()
+                          ? "bg-yellow-400 text-black hover:bg-yellow-300 hover:scale-110"
                           : "bg-gray-600 text-gray-400 cursor-not-allowed"
                       }`}
-                      onClick={canResolveSpin() ? resolveSpinAction : canRequestSpin() ? requestSpinAction : undefined}
+                      onClick={
+                        canResolveSpin() ? resolveSpinAction
+                        : canRequestSpin() ? requestSpinAction
+                        : canStartGame() ? startGameAction
+                        : undefined
+                      }
                     >
-                      {isSpinning || isResolvingTx || isProcessing ? "..." : canResolveSpin() ? "GO!" : "SPIN"}
+                      {isSpinning || isResolvingTx || isProcessing || isStarting
+                        ? "..."
+                        : canResolveSpin()
+                        ? "GO!"
+                        : canRequestSpin()
+                        ? "SPIN"
+                        : canStartGame()
+                        ? "START"
+                        : game?.status === GameStatus.InProgress && !isCreator
+                        ? "LIVE"
+                        : game?.status === GameStatus.Active && !isCreator
+                        ? "WAIT"
+                        : "SPIN"}
                     </div>
                     <div className="absolute w-full h-full flex flex-col items-center justify-center">
                       {players
@@ -788,11 +969,17 @@ const WheelOfFortune: React.FC<WheelOfFortuneProps> = ({ gameId }) => {
                     </div>
                   )}
 
-                  {game?.status === GameStatus.InProgress && isGameCreator && (
-                    <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-                      <p className="text-xs text-yellow-300">
-                        ℹ️ Click <strong>Request Spin</strong>, wait 1 block, then <strong>Resolve Spin</strong> to eliminate a player. If timer runs out, advance the round first.
-                      </p>
+                  {game?.status === GameStatus.InProgress && isCreator && (
+                    <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-1.5">
+                      {canAdvanceRound() ? (
+                        <p className="text-xs text-orange-300">
+                          ⏰ Round expired — click <strong>Advance Round</strong> first, then <strong>Spin</strong>.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-yellow-300">
+                          ℹ️ Click <strong>Spin</strong>, wait ~5 sec (1 block), then click <strong>GO!</strong> to eliminate a player.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

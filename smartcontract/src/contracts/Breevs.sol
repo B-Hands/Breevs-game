@@ -257,6 +257,13 @@ contract BreevsRussianRoulette {
         require(msg.sender == g.creator, "Only host can spin");
         require(g.status == Status.IN_PROGRESS, "Game not in progress");
         require(block.number <= g.roundEnd, "Round has expired");
+
+        // Auto-clear a spin that expired (> 200 blocks old) so the game doesn't get stuck
+        SpinRequest storage existing = pendingSpins[gameId];
+        if (existing.pending && block.number > existing.commitBlock + 200) {
+            delete pendingSpins[gameId];
+        }
+
         require(!pendingSpins[gameId].pending, "Spin already pending");
 
         address[] memory active = _getActivePlayers(gameId);
@@ -297,14 +304,21 @@ contract BreevsRussianRoulette {
         // Random contract retains history longer, but we cap at 200 for safety.
         require(
             block.number <= req.commitBlock + 200,
-            "Spin request expired – request a new spin"
+            "Spin request expired - request a new spin"
         );
 
-        // ── Fetch RANDAO randomness for the committed block ──────────────────
-        bytes32 celoRandom = randomContract.getBlockRandomness(req.commitBlock);
+        // ── Fetch randomness: try Celo RANDAO first, fall back to blockhash ────
+        bytes32 celoRandom;
+        try randomContract.getBlockRandomness(req.commitBlock) returns (bytes32 rand) {
+            celoRandom = rand;
+        } catch {}
+        if (celoRandom == bytes32(0)) {
+            // blockhash() only works within 256 blocks — safe given our 200-block cap
+            celoRandom = blockhash(req.commitBlock);
+        }
         require(
             celoRandom != bytes32(0),
-            "RANDAO not available for that block"
+            "Randomness unavailable - resolve within 200 blocks"
         );
 
         // ── Mix with game-specific entropy to prevent cross-game reuse ────────
@@ -340,6 +354,13 @@ contract BreevsRussianRoulette {
         Game storage g = games[gameId];
         require(g.status == Status.IN_PROGRESS, "Not in progress");
         require(block.number > g.roundEnd, "Round not ended yet");
+
+        // Auto-clear expired spins so the round can advance
+        SpinRequest storage existing = pendingSpins[gameId];
+        if (existing.pending && block.number > existing.commitBlock + 200) {
+            delete pendingSpins[gameId];
+        }
+
         require(!pendingSpins[gameId].pending, "Resolve pending spin first");
 
         address[] memory active = _getActivePlayers(gameId);

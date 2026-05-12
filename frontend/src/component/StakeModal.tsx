@@ -5,6 +5,7 @@ import GlowingEffect from "@/component/GlowingEffectProps";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAccount } from "wagmi";
+import { celoSepolia } from "wagmi/chains";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { useJoinGame } from "@/hooks/useGame";
 import { useGameStore } from "@/store/gameStore";
@@ -14,6 +15,7 @@ import {
   showTransactionToast,
 } from "@/component/Toast";
 import { GameStatus } from "@/lib/contractCalls";
+import { formatEther } from "viem";
 
 interface StakeModalProps {
   isOpen: boolean;
@@ -43,8 +45,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
   const stake = selectedGame?.stake ?? 0n;
   const gameId = selectedGame?.gameId;
 
-  // Contract always uses 1 CELO (1e18 wei)
-  const stakeInCELO = stake > 0n ? Number(stake) / 1e18 : 0;
+  const stakeInCELO = stake > 0n ? formatEther(stake) : "0";
 
   const handleStake = async () => {
     try {
@@ -91,7 +92,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
       showTransactionToast(
         tx.txId as string,
         "success",
-        `https://alfajores.celoscan.io/tx/${tx.txId}`
+        `${celoSepolia.blockExplorers.default.url}/tx/${tx.txId}`
       );
       showSuccessToast("Successfully joined the game!", "Success");
 
@@ -148,7 +149,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
           </p>
           <div className="text-center">
             <p className="text-3xl sm:text-4xl font-bold text-[#FF3B3B] drop-shadow-lg">
-              {stakeInCELO > 0 ? `${stakeInCELO.toFixed(2)} CELO` : "Free Entry"}
+              {stake > 0n ? `${stakeInCELO} CELO` : "Free Entry"}
             </p>
           </div>
         </div>
@@ -169,7 +170,7 @@ const StakeModal: React.FC<StakeModalProps> = ({
             <div className="flex justify-between items-center mt-2">
               <span className="text-xs text-gray-400">Prize Pool:</span>
               <span className="text-xs font-bold text-[#FF3B3B]">
-                {(Number(selectedGame.prizePool) / 1e18).toFixed(2)} CELO
+                {formatEther(selectedGame.prizePool)} CELO
               </span>
             </div>
           </div>

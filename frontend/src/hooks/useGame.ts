@@ -2,13 +2,16 @@
 
 import {
   useQuery,
-  useMutation,
   useQueryClient,
   UseQueryResult,
 } from "@tanstack/react-query";
-import { useWriteContract, useWaitForTransactionReceipt, useAccount } from "wagmi";
+import { useWriteContract, useAccount, useSwitchChain, useChainId } from "wagmi";
+import { celoSepolia } from "wagmi/chains";
+import { parseEventLogs } from "viem";
 import { useState } from "react";
 import {
+  publicClient,
+  BREEVS_ABI,
   getGameInfo,
   getPlayerData,
   getUserStats,
@@ -107,7 +110,8 @@ export function usePendingSpin(gameId: bigint) {
     queryKey: ["pendingSpin", gameId.toString()],
     queryFn: () => getPendingSpin(gameId),
     enabled: !!gameId && gameId > 0n,
-    refetchInterval: 3000,
+    refetchInterval: 2000,
+    staleTime: 0,
   });
 }
 
@@ -187,7 +191,8 @@ export function useMyGames(): UseQueryResult<GameInfo[], Error> {
     queryKey: ["myGames", address ?? "invalid"],
     queryFn: async () => {
       if (!address) return [];
-      const gameIds = Array.from({ length: 10 }, (_, i) => BigInt(i + 1));
+      const total = await getTotalGames();
+      const gameIds = Array.from({ length: Number(total) }, (_, i) => BigInt(i + 1));
       const games: GameInfo[] = [];
       for (const gameId of gameIds) {
         try {
@@ -241,14 +246,37 @@ export function useGameStatus(gameId?: bigint): UseQueryResult<GameInfo, Error> 
 
 /** Generic hook that wraps wagmi writeContract + waits for receipt */
 function useContractWrite() {
-  const { writeContractAsync } = useWriteContract();
+  const { writeContractAsync: _write } = useWriteContract();
+  const { switchChainAsync } = useSwitchChain();
+  const chainId = useChainId();
   const qc = useQueryClient();
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["activeGames"] });
     qc.invalidateQueries({ queryKey: ["myGames"] });
     qc.invalidateQueries({ queryKey: ["gameStatus"] });
     qc.invalidateQueries({ queryKey: ["allGames"] });
   };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const writeContractAsync = async (args: any) => {
+    if (chainId !== celoSepolia.id) {
+      await switchChainAsync({ chainId: celoSepolia.id });
+    }
+    const hash = await _write(args);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status === "reverted") {
+      // Simulate with the same args to extract the revert reason
+      try {
+        await publicClient.simulateContract(args);
+      } catch (simErr: any) {
+        throw simErr;
+      }
+      throw new Error("Transaction reverted on-chain");
+    }
+    return hash;
+  };
+
   return { writeContractAsync, invalidate };
 }
 
@@ -262,9 +290,11 @@ export function useCreateGame() {
     setError(null);
     try {
       const hash = await writeContractAsync(createGameArgs(duration));
-      const totalGames = await getTotalGames();
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+      const logs = parseEventLogs({ abi: BREEVS_ABI, logs: receipt.logs, eventName: "GameCreated" });
+      const gameId = logs[0]?.args.gameId ?? await getTotalGames();
       invalidate();
-      return { txId: hash, gameId: totalGames };
+      return { txId: hash, gameId };
     } catch (err: any) {
       const mapped = mapContractError(err);
       const e = new Error(mapped.message);
@@ -330,6 +360,7 @@ export function useStartGame() {
 
 export function useRequestSpin() {
   const { writeContractAsync, invalidate } = useContractWrite();
+  const qc = useQueryClient();
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
@@ -339,7 +370,7 @@ export function useRequestSpin() {
     try {
       const hash = await writeContractAsync(requestSpinArgs(gameId));
       invalidate();
-      qc_invalidatePendingSpin(gameId);
+      qc.invalidateQueries({ queryKey: ["pendingSpin", gameId.toString()] });
       return { txId: hash };
     } catch (err: any) {
       const mapped = mapContractError(err);
@@ -349,11 +380,6 @@ export function useRequestSpin() {
     } finally {
       setIsPending(false);
     }
-  };
-
-  const qc = useQueryClient();
-  const qc_invalidatePendingSpin = (gameId: bigint) => {
-    qc.invalidateQueries({ queryKey: ["pendingSpin", gameId.toString()] });
   };
 
   return { mutateAsync, isPending, error };
@@ -417,7 +443,7 @@ export function useClaimPrize() {
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const mutateAsync = async ({ gameId, user }: { gameId: bigint; user: string }) => {
+  const mutateAsync = async ({ gameId }: { gameId: bigint; user?: string }) => {
     setIsPending(true);
     setError(null);
     try {

@@ -1397,9 +1397,10 @@ import os
 import json
 
 # Configure Claude
+_claude_key = os.environ.get("CLAUDE_API_KEY")
 try:
-    anthropic_client = anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY"))
-except Exception as e:
+    anthropic_client = anthropic.Anthropic(api_key=_claude_key) if _claude_key else None
+except Exception:
     anthropic_client = None
 
 class GameViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1481,43 +1482,56 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             )
         
         try:
-            players = game.players.all().order_by('joined_at')
-            recent_events = game.events.all().order_by('-block_height')[:5]
-            
-            active_players = players.filter(eliminated=False).count()
-            eliminated_players = players.filter(eliminated=True).count()
-            
-            recent_actions = []
-            for event in recent_events:
-                recent_actions.append({
-                    'type': event.get_event_type_display(),
-                    'round': event.event_data.get('round', '?'),
-                    'player': event.player_address[:8] + '...' if event.player_address else 'N/A'
-                })
-            
-            tension_level = self._calculate_tension_level(game, active_players)
-            
+            # Use frontend-provided live state (blockchain data) rather than the DB
+            req = request.data
+            current_round = int(req.get('current_round') or game.current_round or 1)
+            active_players = int(req.get('active_players') or 6)
+            total_players = int(req.get('total_players') or 6)
+            eliminated_count = int(req.get('eliminated_count') or 0)
+            last_eliminated = req.get('last_eliminated_address')
+            prize_pool_str = req.get('prize_pool') or str(game.prize_pool)
+
+            tension_level = min(
+                round(
+                    ((total_players - active_players) / max(total_players, 1)) * 5
+                    + min(current_round / 10, 1) * 3
+                    + (1 if eliminated_count > 0 else 0)
+                ),
+                10,
+            )
+
+            if last_eliminated:
+                last_action = (
+                    f"Player {last_eliminated[:8]}... was ELIMINATED in Round {current_round}"
+                )
+            elif eliminated_count == 0:
+                last_action = "Game just started — all 6 players are in"
+            else:
+                last_action = f"{eliminated_count} player(s) eliminated so far"
+
             game_context = f"""
                 Current Game State:
                 - Game ID: {game.game_id}
-                - Current Round: {game.current_round}
-                - Players Remaining: {active_players} of {players.count()}
-                - Prize Pool: {game.prize_pool} STX
+                - Current Round: {current_round}
+                - Players Remaining: {active_players} of {total_players} ({eliminated_count} eliminated)
+                - Prize Pool: {prize_pool_str} CELO on the Celo blockchain
                 - Tension Level: {tension_level}/10
 
-                Recent Actions (last 5):
-                {chr(10).join([f"Round {a['round']}: {a['type']} - {a['player']}" for a in recent_actions])}
-
-                Active Players:
-                {chr(10).join([f"- {p.wallet_address[:12]}... {'(Risk Mode Active)' if p.used_risk_mode else ''}" for p in players.filter(eliminated=False)])}
+                Most Recent Action:
+                {last_action}
                 """
-            
-            prompt = f"""You are a live sports commentator for a blockchain Russian Roulette game. 
-                Provide exciting, real-time commentary on the current game state.
 
-                Style: Energetic, suspenseful, focus on the drama of the moment.
-                Keep it to 2-3 punchy sentences about what's happening RIGHT NOW.
-                Make it feel like a live broadcast.
+            prompt = f"""You are a hyped live sports commentator for a Celo blockchain Russian Roulette game.
+                React directly to the MOST RECENT ACTION and the current game state.
+                Reference the actual CELO prize pool, the specific round number, and how many players are left.
+                DO NOT mention STX, Stacks, or any other blockchain.
+
+                Rules:
+                - 2-3 punchy sentences maximum
+                - React to what JUST happened (the most recent action above)
+                - Build tension around who could be eliminated NEXT
+                - Reference the CELO prize pool amount to raise the stakes
+                - Make it feel like you're watching it live right now
 
                 {game_context}
 
@@ -1525,7 +1539,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             if anthropic_client:
                 response = anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
+                    model="claude-haiku-4-5-20251001",
                     max_tokens=300,
                     messages=[{"role": "user", "content": prompt}]
                 )
@@ -1535,14 +1549,14 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             commentary = GameCommentary.objects.create(
                 game=game,
-                round_number=game.current_round,
+                round_number=current_round,
                 commentary_text=commentary_text,
                 commentary_type='live',
                 tension_level=tension_level,
                 context_data={
                     'active_players': active_players,
-                    'recent_events': recent_actions,
-                    'prize_pool': str(game.prize_pool)
+                    'eliminated_count': eliminated_count,
+                    'prize_pool': prize_pool_str,
                 }
             )
             
@@ -1670,8 +1684,8 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             game_context = f"""
                 Game Summary Data:
                 - Game ID: {game.game_id}
-                - Stake Amount: {game.stake_amount} STX per player
-                - Total Prize Pool: {game.prize_pool} STX
+                - Stake Amount: {game.stake_amount} CELO per player
+                - Total Prize Pool: {game.prize_pool} CELO (on Celo blockchain)
                 - Total Players: {players.count()}
                 - Total Rounds: {game.current_round}
                 - Total Spins: {total_spins}
@@ -1687,8 +1701,9 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 {chr(10).join([f"{i+1}. {e['address'][:10]}... - Round {e['round']}" for i, e in enumerate(elimination_order)])}
                 """
             
-            prompt = f"""You are a master storyteller recounting an epic Russian Roulette game on the Celo blockchain. 
-                    Write a compelling narrative summary that captures the full arc of this game.
+            prompt = f"""You are a master storyteller recounting an epic Russian Roulette game on the Celo blockchain.
+                    Write a compelling narrative summary. Always refer to the currency as CELO, never STX or any other token.
+                    Write a compelling narrative that captures the full arc of this game.
 
                     Structure your response:
                     1. **The Setup** - Set the stakes and introduce the battle (2-3 sentences)
@@ -1704,7 +1719,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                                 
             if anthropic_client:
                 response = anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
+                    model="claude-haiku-4-5-20251001",
                     max_tokens=600,
                     messages=[{"role": "user", "content": prompt}]
                 )
@@ -1848,7 +1863,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
                 Current Game State:
                 - Round: {game.current_round}
                 - Players Remaining: {players.count()}
-                - Prize Pool: {game.prize_pool} STX
+                - Prize Pool: {game.prize_pool} CELO (on Celo blockchain)
 
                 Player Statistics:
                 {chr(10).join([f"Player {p['address']}: {p['survival_count']} survivals, Risk Mode: {p['risk_mode_active']}, Position: {p['position']}" for p in player_stats])}
@@ -1863,7 +1878,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             if anthropic_client:
                 response = anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
+                    model="claude-haiku-4-5-20251001",
                     max_tokens=600,
                     messages=[{"role": "user", "content": context}]
                 )
@@ -1979,7 +1994,7 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
             
             if anthropic_client:
                 response = anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
+                    model="claude-haiku-4-5-20251001",
                     max_tokens=700,
                     messages=[{"role": "user", "content": context}]
                 )

@@ -1,8 +1,9 @@
 "use client";
 
-import { createPublicClient, http, parseEther, formatEther } from "viem";
-import { celoAlfajores } from "wagmi/chains";
+import { createPublicClient, http, fallback, parseEther, formatEther } from "viem";
+import { celoSepolia } from "wagmi/chains";
 import { BREEVS_ABI } from "./BreevsABI";
+export { BREEVS_ABI };
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -12,16 +13,20 @@ export const CONTRACT_ADDRESS = (
 
 export const CONTRACT_NAME = process.env.NEXT_PUBLIC_CONTRACT_NAME || "BreevsRussianRoulette";
 
-export const MIN_STAKE = parseEther("1"); // 1 CELO in wei
+export const MIN_STAKE = parseEther("1"); // 1 CELO — must match contract MIN_STAKE constant
 
 // ─── Public client for reads ─────────────────────────────────────────────────
 
+const sepoliaTransports = [
+  process.env.NEXT_PUBLIC_CELO_RPC_URL,
+  "https://rpc.ankr.com/celo_sepolia", // ✅ replace drpc.org
+]
+  .filter(Boolean)
+  .map((url) => http(url as string));
+
 export const publicClient = createPublicClient({
-  chain: celoAlfajores,
-  transport: http(
-    process.env.NEXT_PUBLIC_CELO_RPC_URL ||
-      "https://alfajores-forno.celo-testnet.org"
-  ),
+  chain: celoSepolia,
+  transport: fallback(sepoliaTransports),
 });
 
 // ─── Enums / Interfaces ──────────────────────────────────────────────────────
@@ -103,7 +108,6 @@ export async function getGameInfo(gameId: bigint): Promise<GameInfo> {
   const winnerAddr = winner === "0x0000000000000000000000000000000000000000" ? null : winner;
 
   // Build full player list: active + eliminated
-  const activeAddrs = (activePlayers as string[]).map((a) => a.toLowerCase());
 
   // We need to figure out eliminated players. We'll get all players from game
   // by looking at events or doing per-player lookups. For simplicity, we note:
@@ -240,6 +244,7 @@ export function createGameArgs(roundDuration: bigint) {
     functionName: "createGame" as const,
     args: [MIN_STAKE, roundDuration] as const,
     value: MIN_STAKE,
+    chain: celoSepolia,
   };
 }
 

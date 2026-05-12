@@ -5,8 +5,15 @@ import { motion, AnimatePresence } from "framer-motion";
 
 interface AICommentaryBoxProps {
   gameId: bigint;
-  isVisible: boolean;
+  eventTrigger: number;
   onClose: () => void;
+  // game state passed to backend so AI has real context
+  currentRound?: number;
+  activePlayers?: number;
+  totalPlayers?: number;
+  eliminatedCount?: number;
+  lastEliminatedAddress?: string | null;
+  prizePool?: string;
 }
 
 interface Commentary {
@@ -18,43 +25,52 @@ interface Commentary {
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export default function AICommentaryBox({
-  gameId,
-  isVisible,
-  onClose,
+  gameId, eventTrigger, onClose,
+  currentRound, activePlayers, totalPlayers, eliminatedCount, lastEliminatedAddress, prizePool,
 }: AICommentaryBoxProps) {
   const [commentary, setCommentary] = useState<Commentary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [displayedText, setDisplayedText] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [isMinimised, setIsMinimised] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevTrigger = useRef(-1);
 
   const fetchCommentary = async () => {
+    if (isLoading) return;
     setIsLoading(true);
     setError(null);
     setDisplayedText("");
+    setIsMinimised(false);
     try {
       const response = await fetch(
         `${BACKEND_URL}/api/games/${gameId.toString()}/generate_live_commentary/`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            current_round: currentRound,
+            active_players: activePlayers,
+            total_players: totalPlayers ?? 6,
+            eliminated_count: eliminatedCount ?? 0,
+            last_eliminated_address: lastEliminatedAddress ?? null,
+            prize_pool: prizePool ?? null,
+          }),
         }
       );
-
       if (!response.ok) {
         const data = await response.json();
         throw new Error(data.error || "Failed to fetch commentary");
       }
-
       const data = await response.json();
-      const commentaryData: Commentary = {
+      const c: Commentary = {
         text: data.commentary_text,
         tensionLevel: data.tension_level,
         timestamp: data.created_at,
       };
-      setCommentary(commentaryData);
-      typewriterEffect(commentaryData.text);
+      setCommentary(c);
+      typewriterEffect(c.text);
     } catch (err: any) {
       setError(err.message || "Could not fetch commentary");
     } finally {
@@ -63,16 +79,15 @@ export default function AICommentaryBox({
   };
 
   const typewriterEffect = (text: string) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
     setIsTyping(true);
     setDisplayedText("");
     let i = 0;
-    const speed = 18;
-
     const type = () => {
       if (i < text.length) {
         setDisplayedText((prev) => prev + text.charAt(i));
         i++;
-        timerRef.current = setTimeout(type, speed);
+        timerRef.current = setTimeout(type, 18);
       } else {
         setIsTyping(false);
       }
@@ -80,136 +95,113 @@ export default function AICommentaryBox({
     type();
   };
 
+  // Auto-fetch whenever a game event fires
   useEffect(() => {
-    if (isVisible && gameId > 0n) {
-      fetchCommentary();
-    }
+    if (gameId <= 0n) return;
+    if (eventTrigger === prevTrigger.current) return;
+    prevTrigger.current = eventTrigger;
+    fetchCommentary();
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [isVisible, gameId]);
+  }, [eventTrigger, gameId]);
 
-  const getTensionColor = (level: number) => {
-    if (level >= 8) return "text-red-400";
-    if (level >= 5) return "text-orange-400";
-    return "text-yellow-400";
-  };
-
-  const getTensionLabel = (level: number) => {
-    if (level >= 9) return "CRITICAL";
-    if (level >= 7) return "HIGH";
-    if (level >= 5) return "MEDIUM";
-    return "LOW";
-  };
+  const tensionColor = (l: number) => l >= 8 ? "text-red-400" : l >= 5 ? "text-orange-400" : "text-yellow-400";
+  const tensionLabel = (l: number) => l >= 9 ? "CRITICAL" : l >= 7 ? "HIGH" : l >= 5 ? "MEDIUM" : "LOW";
 
   return (
     <AnimatePresence>
-      {isVisible && (
-        <motion.div
-          initial={{ opacity: 0, x: 60 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: 60 }}
-          transition={{ type: "spring", damping: 22, stiffness: 200 }}
-          className="fixed bottom-24 right-4 z-50 w-80 sm:w-96"
-        >
-          {/* Glow ring */}
-          <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-violet-500/20 to-red-500/20 blur-xl pointer-events-none" />
+      <motion.div
+        initial={{ opacity: 0, y: 40 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 40 }}
+        transition={{ type: "spring", damping: 22, stiffness: 200 }}
+        className="fixed bottom-24 right-4 z-50 w-80 sm:w-96"
+      >
+        {/* Glow ring */}
+        <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-red-500/20 to-violet-500/20 blur-xl pointer-events-none" />
 
-          <div className="relative bg-[#0a0d1f]/95 backdrop-blur-xl border border-violet-500/30 rounded-2xl overflow-hidden shadow-2xl shadow-violet-900/30">
-            
-            {/* Header */}
-            <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-violet-900/60 to-purple-900/60 border-b border-violet-500/20">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-400 to-purple-600 flex items-center justify-center text-xs">
-                  🤖
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-violet-200">Claude AI</p>
-                  <p className="text-[10px] text-violet-400">Live Commentary</p>
-                </div>
-              </div>
+        <div className="relative bg-[#0a0d1f]/95 backdrop-blur-xl border border-red-500/30 rounded-2xl overflow-hidden shadow-2xl shadow-red-900/20">
 
-              <div className="flex items-center gap-2">
-                {/* Tension level badge */}
-                {commentary && (
-                  <div className="flex items-center gap-1 bg-black/30 rounded-full px-2 py-0.5">
-                    <span className="text-[10px] text-gray-400">Tension:</span>
-                    <span className={`text-[10px] font-bold ${getTensionColor(commentary.tensionLevel)}`}>
-                      {getTensionLabel(commentary.tensionLevel)}
-                    </span>
-                    <span className={`text-xs ${getTensionColor(commentary.tensionLevel)}`}>
-                      {Array.from({ length: Math.min(commentary.tensionLevel, 5) }, (_, i) => "▮").join("")}
-                      {Array.from({ length: Math.max(5 - commentary.tensionLevel, 0) }, (_, i) => "▯").join("")}
-                    </span>
-                  </div>
-                )}
-
-                {/* Close button */}
-                <button
-                  onClick={onClose}
-                  className="text-gray-400 hover:text-white transition-colors w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10"
-                >
-                  ✕
-                </button>
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-red-900/60 to-violet-900/60 border-b border-red-500/20">
+            <div className="flex items-center gap-2">
+              {/* Live pulse dot */}
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
+              </span>
+              <div>
+                <p className="text-xs font-bold text-white tracking-wide">🎰 Russian Roulette AI</p>
+                <p className="text-[10px] text-red-400">Live Game Commentary</p>
               </div>
             </div>
 
-            {/* Commentary body */}
-            <div className="p-4 min-h-[100px]">
-              {isLoading && (
-                <div className="flex items-center gap-3">
-                  <div className="w-5 h-5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                  <p className="text-xs text-gray-400 animate-pulse">
-                    Claude is watching the game...
-                  </p>
+            <div className="flex items-center gap-2">
+              {commentary && !isLoading && (
+                <div className="flex items-center gap-1 bg-black/30 rounded-full px-2 py-0.5">
+                  <span className="text-[10px] text-gray-400">Tension:</span>
+                  <span className={`text-[10px] font-bold ${tensionColor(commentary.tensionLevel)}`}>
+                    {tensionLabel(commentary.tensionLevel)}
+                  </span>
                 </div>
               )}
-
-              {error && !isLoading && (
-                <div className="text-xs text-red-400 text-center">
-                  <p>⚠️ {error}</p>
-                  <p className="text-gray-500 mt-1">Make sure backend is running</p>
-                </div>
-              )}
-
-              {!isLoading && !error && (
-                <div className="relative">
-                  {/* Typing cursor */}
-                  <p className="text-sm text-gray-100 leading-relaxed font-light">
-                    {displayedText}
-                    {isTyping && (
-                      <span className="inline-block w-0.5 h-4 bg-violet-400 ml-0.5 animate-pulse" />
-                    )}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Footer with refresh button */}
-            <div className="flex items-center justify-between px-4 py-2 border-t border-violet-500/10 bg-black/20">
-              <p className="text-[10px] text-gray-500">
-                Powered by Claude 3.5 Haiku
-              </p>
+              {/* Minimise */}
               <button
-                onClick={fetchCommentary}
-                disabled={isLoading}
-                className={`text-[10px] text-violet-300 hover:text-violet-100 font-semibold transition-all flex items-center gap-1 ${
-                  isLoading ? "opacity-50 cursor-not-allowed" : "hover:underline"
-                }`}
+                onClick={() => setIsMinimised((v) => !v)}
+                className="text-gray-400 hover:text-white transition-colors w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 text-xs"
               >
-                {isLoading ? (
-                  <>
-                    <div className="w-3 h-3 border border-violet-400 border-t-transparent rounded-full animate-spin" />
-                    Loading...
-                  </>
-                ) : (
-                  <>↻ Refresh</>
-                )}
+                {isMinimised ? "▲" : "▼"}
+              </button>
+              {/* Close */}
+              <button
+                onClick={onClose}
+                className="text-gray-400 hover:text-white transition-colors w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10"
+              >
+                ✕
               </button>
             </div>
           </div>
-        </motion.div>
-      )}
+
+          {/* Body — hidden when minimised */}
+          {!isMinimised && (
+            <div className="p-4 min-h-[90px]">
+              {isLoading && (
+                <div className="flex items-center gap-3">
+                  <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  <p className="text-xs text-gray-400 animate-pulse">Watching the game...</p>
+                </div>
+              )}
+              {error && !isLoading && (
+                <div className="text-xs text-red-400 text-center">
+                  <p>⚠️ {error}</p>
+                  <button onClick={fetchCommentary} className="mt-1 text-violet-300 hover:underline text-[10px]">Retry</button>
+                </div>
+              )}
+              {!isLoading && !error && (
+                <p className="text-sm text-gray-100 leading-relaxed font-light">
+                  {displayedText}
+                  {isTyping && <span className="inline-block w-0.5 h-4 bg-red-400 ml-0.5 animate-pulse" />}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Footer */}
+          {!isMinimised && (
+            <div className="flex items-center justify-between px-4 py-2 border-t border-red-500/10 bg-black/20">
+              <p className="text-[10px] text-gray-500">Powered by Claude Haiku 4.5</p>
+              <button
+                onClick={fetchCommentary}
+                disabled={isLoading}
+                className="text-[10px] text-red-300 hover:text-red-100 font-semibold transition-all disabled:opacity-50 flex items-center gap-1"
+              >
+                {isLoading ? <><span className="w-2.5 h-2.5 border border-red-400 border-t-transparent rounded-full animate-spin inline-block" /> Loading</> : "↻ Refresh"}
+              </button>
+            </div>
+          )}
+        </div>
+      </motion.div>
     </AnimatePresence>
   );
 }

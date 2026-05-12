@@ -2,13 +2,16 @@
 
 import Modal from "@/component/ResuableModal";
 import GlowingEffect from "@/component/GlowingEffectProps";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId, useSwitchChain } from "wagmi";
+import { celoSepolia } from "wagmi/chains";
+
 import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { useCreateGame } from "@/hooks/useGame";
 import { useGameStore } from "@/store/gameStore";
-import { getGameInfo } from "@/lib/contractCalls";
+import { getGameInfo, MIN_STAKE } from "@/lib/contractCalls";
+import { formatEther } from "viem";
 import {
   showErrorToast,
   showSuccessToast,
@@ -26,14 +29,28 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
 }) => {
   const router = useRouter();
   const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const { switchChainAsync, isPending: isSwitching } = useSwitchChain();
   const { openConnectModal } = useConnectModal();
   const { mutateAsync: createGame, isPending } = useCreateGame();
   const { setCurrentCreatorGame, getCurrentActiveGame, hasActiveGame } =
     useGameStore();
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
-  // Fixed stake: 1 CELO per the contract
-  const FIXED_STAKE_CELO = "1";
-  const ROUND_DURATION = 600n; // blocks
+  const isWrongChain = isConnected && chainId !== celoSepolia.id;
+
+  const FIXED_STAKE_CELO = formatEther(MIN_STAKE); // derived from contract constant
+  const MAX_PLAYERS = 6;
+  const ROUND_DURATION = 20n; // blocks (~2 min on Celo Sepolia)
+
+  const handleSwitchChain = async () => {
+    setSwitchError(null);
+    try {
+      await switchChainAsync({ chainId: celoSepolia.id });
+    } catch {
+      setSwitchError("Failed to switch network. Please switch manually in your wallet.");
+    }
+  };
 
   const handleCreateGame = async () => {
     if (!isConnected || !address) {
@@ -62,7 +79,7 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
       showTransactionToast(
         txId,
         "success",
-        `https://alfajores.celoscan.io/tx/${txId}`
+        `${celoSepolia.blockExplorers.default.url}/tx/${txId}`
       );
 
       const gameInfo = await getGameInfo(gameId);
@@ -127,8 +144,8 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-4">
           <p className="text-xs text-blue-200 text-center">
             💡 Each player must stake{" "}
-            <span className="text-[#FF3B3B] font-bold">1 CELO</span> to join.
-            Winner takes all 6 CELO!
+            <span className="text-[#FF3B3B] font-bold">{FIXED_STAKE_CELO} CELO</span> to join.
+            Winner takes all {Number(FIXED_STAKE_CELO) * MAX_PLAYERS} CELO!
           </p>
         </div>
 
@@ -139,6 +156,26 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
             <span className="text-yellow-300 font-bold">5 CELO</span>
           </p>
         </div>
+
+        {/* Wrong Network Warning */}
+        {isWrongChain && (
+          <div className="mb-4 p-3 bg-red-900/40 border border-red-500/60 rounded-lg">
+            <p className="text-xs text-red-300 text-center mb-2">
+              Wrong network detected. This game runs on{" "}
+              <span className="font-bold text-red-200">Celo Sepolia Testnet</span>.
+            </p>
+            {switchError && (
+              <p className="text-xs text-red-400 text-center mb-2">{switchError}</p>
+            )}
+            <button
+              className="w-full bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors disabled:opacity-50"
+              onClick={handleSwitchChain}
+              disabled={isSwitching}
+            >
+              {isSwitching ? "Switching..." : "Switch to Celo Sepolia Testnet"}
+            </button>
+          </div>
+        )}
 
         {/* Wallet Warning */}
         {!isConnected && (
@@ -152,12 +189,12 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
         {/* Action Button */}
         <button
           className={`w-full bg-gradient-to-r from-red-600 to-red-500 hover:from-red-700 hover:to-red-600 text-white font-bold py-2 px-4 rounded-xl transition-all duration-300 shadow-lg hover:shadow-red-500/50 ${
-            isPending || !isConnected
+            isPending || !isConnected || isWrongChain
               ? "opacity-50 cursor-not-allowed"
               : "hover:scale-105"
           }`}
           onClick={handleCreateGame}
-          disabled={isPending}
+          disabled={isPending || isWrongChain}
         >
           {isPending ? (
             <span className="flex items-center justify-center gap-2">
@@ -184,7 +221,7 @@ const CreateGameModal: React.FC<CreateGameModalProps> = ({
               Creating Game...
             </span>
           ) : isConnected ? (
-            "Create Game Room (1 CELO)"
+            "Create Game Room (0.1 CELO)"
           ) : (
             "Connect Wallet"
           )}

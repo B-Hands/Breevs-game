@@ -56,9 +56,9 @@ export default function HomePage() {
   // Filter active games based on store filters
   const filteredActiveGames = activeGames
     .filter((game) => {
-      const stakeInStx = Number(game.stake) / 1_000_000;
+      const stakeInCelo = Number(game.stake) / 1e18;
       return (
-        stakeInStx >= Number(filters.minStake) && game.status === filters.status
+        stakeInCelo >= Number(filters.minStake) && game.status === filters.status
       );
     })
     .sort(() => {
